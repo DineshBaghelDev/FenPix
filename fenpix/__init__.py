@@ -10,6 +10,7 @@ from .tokenizer import (
 )
 from .maskgit import MaskGIT, MaskGITConfig, maskgit_loss, random_mask_tokens
 from .hierarchy import HierarchicalMaskGIT, HierarchicalMaskGITConfig, condition_to_shape, stage_native_shape, stage_tokens_from_batch
+from .color import IndexedColorConfig, IndexedColorModel, palette_mask_from_sizes, palette_to_uint8, reconstruct_indexed_png
 from .text import FrozenHashTextEncoder, TextEmbeddingCache, TextEncoderConfig
 
 __all__ = [
@@ -19,6 +20,8 @@ __all__ = [
     "FrozenHashTextEncoder",
     "HierarchicalMaskGIT",
     "HierarchicalMaskGITConfig",
+    "IndexedColorConfig",
+    "IndexedColorModel",
     "MaskGIT",
     "MaskGITConfig",
     "StructureTokenizer",
@@ -32,9 +35,12 @@ __all__ = [
     "extract_palette",
     "image_to_indices",
     "maskgit_loss",
+    "palette_mask_from_sizes",
+    "palette_to_uint8",
     "masked_cross_entropy",
     "pixel_art_collate",
     "reconstruct_rgba",
+    "reconstruct_indexed_png",
     "random_mask_tokens",
     "stage_native_shape",
     "stage_tokens_from_batch",

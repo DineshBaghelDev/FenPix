@@ -22,6 +22,7 @@ class MaskGITConfig:
     text_dim: int = 0
     cond_tokens: int = 1
     structure_cond: bool = False
+    structure_vocab_size: int | None = None
 
     @property
     def mask_token_id(self) -> int:
@@ -78,7 +79,9 @@ class MaskGIT(nn.Module):
             raise ValueError("hidden_dim must be divisible by heads")
         self.token_embed = nn.Embedding(self.config.vocab_size + 2, self.config.hidden_dim)
         self.structure_cond_embed = (
-            nn.Embedding(self.config.vocab_size + 2, self.config.hidden_dim) if self.config.structure_cond else None
+            nn.Embedding((self.config.structure_vocab_size or self.config.vocab_size) + 2, self.config.hidden_dim)
+            if self.config.structure_cond
+            else None
         )
         self.row_embed = nn.Embedding(self.config.max_height, self.config.hidden_dim)
         self.col_embed = nn.Embedding(self.config.max_width, self.config.hidden_dim)
@@ -119,11 +122,12 @@ class MaskGIT(nn.Module):
         cols = torch.arange(width, device=tokens.device)
         x = self.token_embed(x_tokens)
         if self.structure_cond_embed is not None:
+            structure_pad_token_id = self.structure_cond_embed.num_embeddings - 1
             if structure_condition is None:
-                structure_condition = torch.full_like(tokens, self.config.pad_token_id)
+                structure_condition = torch.full_like(tokens, structure_pad_token_id)
             if structure_condition.shape != tokens.shape:
                 raise ValueError("structure_condition must match tokens shape")
-            cond_tokens = structure_condition.masked_fill(~valid_mask, self.config.pad_token_id)
+            cond_tokens = structure_condition.masked_fill(~valid_mask, structure_pad_token_id)
             x = x + self.structure_cond_embed(cond_tokens)
         x = x + self.row_embed(rows)[None, :, None, :] + self.col_embed(cols)[None, None, :, :]
         x = x.reshape(batch, height * width, self.config.hidden_dim)
