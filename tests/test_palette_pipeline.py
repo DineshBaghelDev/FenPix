@@ -10,9 +10,11 @@ from torch.utils.data import DataLoader
 from fenpix import (
     BucketBatchSampler,
     PixelArtDataset,
+    filtered_indices,
     image_to_indices,
     pixel_art_collate,
     reconstruct_rgba,
+    train_val_test_split,
     train_validation_split,
 )
 
@@ -131,6 +133,33 @@ class PalettePipelineTest(unittest.TestCase):
         self.assertEqual(val_a.indices, val_b.indices)
         self.assertNotEqual(val_a.indices, val_c.indices)
         self.assertEqual(len(train_a) + len(val_a), len(dataset))
+
+    def test_train_val_test_split_is_deterministic_and_disjoint(self):
+        dataset = PixelArtDataset(SAMPLES)
+
+        train, val, test = train_val_test_split(dataset, validation_fraction=0.25, test_fraction=0.25, seed=123)
+        train_b, val_b, test_b = train_val_test_split(dataset, validation_fraction=0.25, test_fraction=0.25, seed=123)
+        all_indices = train.indices + val.indices + test.indices
+
+        self.assertEqual(train.indices, train_b.indices)
+        self.assertEqual(val.indices, val_b.indices)
+        self.assertEqual(test.indices, test_b.indices)
+        self.assertEqual(len(all_indices), len(set(all_indices)))
+        self.assertEqual(len(all_indices), len(dataset))
+
+    def test_lossy_filter_excludes_by_default_and_can_include(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_rgba(root / "ok.png", 2, 2)
+            noisy = np.array([[[i * 20, 0, 255 - i * 20, 255] for i in range(9)]], dtype=np.uint8)
+            Image.fromarray(noisy, "RGBA").save(root / "lossy.png")
+            dataset = PixelArtDataset(root, max_colors=8)
+
+            lossless = filtered_indices(dataset)
+            all_rows = filtered_indices(dataset, include_lossy=True)
+
+        self.assertEqual(len(lossless), 1)
+        self.assertEqual(len(all_rows), 2)
 
     def test_bucket_batch_sampler_groups_aspect_and_resolution_buckets(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -14,9 +14,9 @@ from torch.utils.data import DataLoader, Subset
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fenpix.color import IndexedColorConfig, IndexedColorModel, reconstruct_indexed_png
-from fenpix.dataset import BucketBatchSampler, PixelArtDataset, pixel_art_collate
+from fenpix.dataset import BucketBatchSampler, PixelArtDataset, filtered_indices, pixel_art_collate, split_report, train_val_test_split
 from fenpix.hierarchy import HierarchicalMaskGIT, condition_to_shape, stage_tokens_from_batch
-from fenpix.text import FrozenHashTextEncoder, TextEmbeddingCache, TextEncoderConfig
+from fenpix.text import FrozenPretrainedTextEncoder, TextEmbeddingCache, TextEncoderConfig
 from fenpix.tokenizer import StructureTokenizer
 
 
@@ -29,14 +29,12 @@ def _captions(batch) -> list[str]:
     return out
 
 
-def _dataset(args: argparse.Namespace):
+def _splits(args: argparse.Namespace):
     dataset = PixelArtDataset(args.data, max_colors=args.max_colors, cache=args.cache)
-    keep = [i for i in range(len(dataset)) if int(dataset[i]["bucket_size"]) <= args.max_size]
-    if args.limit:
-        keep = keep[: args.limit]
+    keep = filtered_indices(dataset, max_bucket_size=args.max_size, include_lossy=args.include_lossy, limit=args.limit)
     if not keep:
         raise ValueError(f"no <={args.max_size} PNGs found")
-    return Subset(dataset, keep)
+    return train_val_test_split(Subset(dataset, keep), args.validation_fraction, args.test_fraction, args.seed)
 
 
 def _structure_for_batch(batch, tokenizer: StructureTokenizer, stage: int, device: torch.device) -> torch.Tensor:
@@ -85,10 +83,11 @@ def _save_viz(structure: torch.Tensor, valid: torch.Tensor, sample: dict[str, to
 def train(args: argparse.Namespace) -> dict[str, float]:
     device = torch.device(args.device)
     tokenizer = StructureTokenizer.load_checkpoint(args.tokenizer, map_location=device).to(device).eval()
-    text_encoder = FrozenHashTextEncoder(TextEncoderConfig(dim=args.text_dim))
+    text_encoder = FrozenPretrainedTextEncoder(TextEncoderConfig(dim=args.text_dim, provider=args.text_provider, device=args.device))
     text_cache = TextEmbeddingCache(args.embedding_cache, text_encoder) if args.embedding_cache else None
-    dataset = _dataset(args)
-    loader = DataLoader(dataset, batch_sampler=BucketBatchSampler(dataset, args.batch_size, seed=args.seed), collate_fn=pixel_art_collate)
+    train_set, validation_set, test_set = _splits(args)
+    loader = DataLoader(train_set, batch_sampler=BucketBatchSampler(train_set, args.batch_size, seed=args.seed), collate_fn=pixel_art_collate)
+    validation_loader = DataLoader(validation_set, batch_sampler=BucketBatchSampler(validation_set, args.batch_size, seed=args.seed), collate_fn=pixel_art_collate)
     config = IndexedColorConfig(
         max_colors=args.max_colors,
         min_colors=args.min_colors,
@@ -129,7 +128,8 @@ def train(args: argparse.Namespace) -> dict[str, float]:
             for key in totals:
                 totals[key] += float(losses[key].item())
             steps += 1
-        last = {"epoch": epoch} | {key: value / max(steps, 1) for key, value in totals.items()}
+        val = _validation_loss(model, validation_loader, tokenizer, text_encoder, args, device)
+        last = {"epoch": epoch, "split": split_report(train_set, validation_set, test_set), "validation_loss": val} | {key: value / max(steps, 1) for key, value in totals.items()}
         print(json.dumps(last, sort_keys=True))
 
     if args.checkpoint:
@@ -144,12 +144,35 @@ def train(args: argparse.Namespace) -> dict[str, float]:
     return last
 
 
+@torch.no_grad()
+def _validation_loss(model, loader, tokenizer, text_encoder, args, device: torch.device) -> float:
+    model.eval()
+    total = 0.0
+    steps = 0
+    for batch in loader:
+        text = text_encoder.encode(_captions(batch)).to(device)
+        structure = _structure_for_batch(batch, tokenizer, min(args.stage, args.max_size), device)
+        losses = model.loss(
+            batch["indices"].to(device),
+            batch["valid_mask"].to(device),
+            structure,
+            text,
+            batch["palette"].to(device),
+            batch["palette_mask"].to(device),
+            batch["palette_size"].to(device),
+            0.0,
+        )
+        total += float(losses["loss"].item())
+        steps += 1
+    return total / max(steps, 1)
+
+
 def sample(args: argparse.Namespace) -> None:
     device = torch.device(args.device)
     color = IndexedColorModel.load_checkpoint(args.checkpoint, map_location=device).to(device).eval()
     prompts = args.prompts or ["pixel art"]
     prompts = (prompts * ((args.samples + len(prompts) - 1) // len(prompts)))[: args.samples]
-    text = FrozenHashTextEncoder(TextEncoderConfig(dim=color.config.text_dim)).encode(prompts).to(device) if color.config.text_dim else None
+    text = FrozenPretrainedTextEncoder(TextEncoderConfig(dim=color.config.text_dim, provider=args.text_provider, device=args.device)).encode(prompts).to(device) if color.config.text_dim else None
 
     if args.hierarchy:
         hierarchy = HierarchicalMaskGIT.load_checkpoint(args.hierarchy, map_location=device).to(device).eval()
@@ -181,6 +204,9 @@ def main() -> None:
     train_parser.add_argument("--epochs", type=int, default=20)
     train_parser.add_argument("--batch-size", type=int, default=4)
     train_parser.add_argument("--limit", type=int, default=32)
+    train_parser.add_argument("--validation-fraction", type=float, default=0.2)
+    train_parser.add_argument("--test-fraction", type=float, default=0.2)
+    train_parser.add_argument("--include-lossy", action="store_true")
     train_parser.add_argument("--max-colors", type=int, default=64)
     train_parser.add_argument("--min-colors", type=int, default=8)
     train_parser.add_argument("--max-size", type=int, default=128)
@@ -189,6 +215,7 @@ def main() -> None:
     train_parser.add_argument("--depth", type=int, default=2)
     train_parser.add_argument("--heads", type=int, default=4)
     train_parser.add_argument("--text-dim", type=int, default=64)
+    train_parser.add_argument("--text-provider", choices=["clip", "tiny"], default="clip")
     train_parser.add_argument("--cond-tokens", type=int, default=1)
     train_parser.add_argument("--cond-dropout", type=float, default=0.1)
     train_parser.add_argument("--embedding-cache", type=Path, default=Path("runs/m7_text_cache.pt"))
@@ -213,6 +240,7 @@ def main() -> None:
     sample_parser.add_argument("--structure-steps", type=int, default=8)
     sample_parser.add_argument("--temperature", type=float, default=1.0)
     sample_parser.add_argument("--guidance-scale", type=float, default=2.0)
+    sample_parser.add_argument("--text-provider", choices=["clip", "tiny"], default="clip")
     sample_parser.add_argument("--prompts", nargs="*")
     sample_parser.set_defaults(func=sample)
 

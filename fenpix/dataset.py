@@ -143,6 +143,51 @@ def train_validation_split(
     return Subset(dataset, order[validation_count:]), Subset(dataset, order[:validation_count])
 
 
+def train_val_test_split(
+    dataset: Dataset,
+    validation_fraction: float = 0.2,
+    test_fraction: float = 0.2,
+    seed: int = 0,
+) -> tuple[Subset, Subset, Subset]:
+    if validation_fraction <= 0 or test_fraction <= 0 or validation_fraction + test_fraction >= 1:
+        raise ValueError("validation/test fractions must be positive and sum to less than 1")
+    generator = torch.Generator().manual_seed(seed)
+    order = torch.randperm(len(dataset), generator=generator).tolist()
+    test_count = max(1, round(len(order) * test_fraction))
+    validation_count = max(1, round(len(order) * validation_fraction))
+    return (
+        Subset(dataset, order[test_count + validation_count :]),
+        Subset(dataset, order[test_count : test_count + validation_count]),
+        Subset(dataset, order[:test_count]),
+    )
+
+
+def filtered_indices(
+    dataset: Dataset,
+    *,
+    max_bucket_size: int | None = None,
+    include_lossy: bool = False,
+    limit: int | None = None,
+) -> list[int]:
+    keep = []
+    for index in range(len(dataset)):
+        sample = dataset[index]
+        if max_bucket_size is not None and int(sample["bucket_size"]) > max_bucket_size:
+            continue
+        if sample["lossy"] and not include_lossy:
+            continue
+        keep.append(index)
+    return keep[:limit] if limit else keep
+
+
+def split_report(train: Dataset, validation: Dataset, test: Dataset) -> dict[str, Any]:
+    def row(dataset: Dataset) -> dict[str, int]:
+        lossy = sum(1 for index in range(len(dataset)) if dataset[index]["lossy"])
+        return {"count": len(dataset), "lossy": lossy, "lossless": len(dataset) - lossy}
+
+    return {"train": row(train), "validation": row(validation), "test": row(test)}
+
+
 class BucketBatchSampler(Sampler[list[int]]):
     def __init__(self, dataset: Dataset, batch_size: int, seed: int = 0, drop_last: bool = False):
         self.dataset = dataset

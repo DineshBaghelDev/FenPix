@@ -1,4 +1,15 @@
-from .dataset import BucketBatchSampler, PixelArtDataset, bucket_id, dataset_quality_report, pixel_art_collate, quality_score, train_validation_split
+from .dataset import (
+    BucketBatchSampler,
+    PixelArtDataset,
+    bucket_id,
+    dataset_quality_report,
+    filtered_indices,
+    pixel_art_collate,
+    quality_score,
+    split_report,
+    train_val_test_split,
+    train_validation_split,
+)
 from .palette import PaletteEncoding, StructureEncoding, extract_palette, image_to_indices, reconstruct_rgba
 from .tokenizer import (
     StructureTokenizer,
@@ -12,7 +23,7 @@ from .maskgit import MaskGIT, MaskGITConfig, maskgit_loss, random_mask_tokens
 from .hierarchy import HierarchicalMaskGIT, HierarchicalMaskGITConfig, condition_to_shape, stage_native_shape, stage_tokens_from_batch
 from .color import IndexedColorConfig, IndexedColorModel, palette_mask_from_sizes, palette_to_uint8, reconstruct_indexed_png
 from .evaluation import PROMPT_EVAL_SET, QualityMetrics, compute_quality_metrics
-from .text import FrozenHashTextEncoder, FrozenPretrainedTextEncoder, TextEmbeddingCache, TextEncoderConfig
+from .text import FrozenHashTextEncoder, FrozenPretrainedTextEncoder, FrozenTinyTextEncoder, FrozenVisionLanguageEncoder, TextEmbeddingCache, TextEncoderConfig
 
 __all__ = [
     "BucketBatchSampler",
@@ -20,6 +31,8 @@ __all__ = [
     "PixelArtDataset",
     "FrozenHashTextEncoder",
     "FrozenPretrainedTextEncoder",
+    "FrozenTinyTextEncoder",
+    "FrozenVisionLanguageEncoder",
     "HierarchicalMaskGIT",
     "HierarchicalMaskGITConfig",
     "IndexedColorConfig",
@@ -39,6 +52,7 @@ __all__ = [
     "compute_quality_metrics",
     "dataset_quality_report",
     "extract_palette",
+    "filtered_indices",
     "image_to_indices",
     "maskgit_loss",
     "palette_mask_from_sizes",
@@ -46,6 +60,7 @@ __all__ = [
     "masked_cross_entropy",
     "pixel_art_collate",
     "quality_score",
+    "split_report",
     "reconstruct_rgba",
     "reconstruct_indexed_png",
     "random_mask_tokens",
@@ -53,5 +68,6 @@ __all__ = [
     "stage_tokens_from_batch",
     "structure_one_hot",
     "tokenizer_metrics",
+    "train_val_test_split",
     "train_validation_split",
 ]

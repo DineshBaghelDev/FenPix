@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .maskgit import MaskGIT, MaskGITConfig, random_mask_tokens
+from .maskgit import random_mask_tokens
 from .palette import reconstruct_rgba
 
 
@@ -25,6 +25,23 @@ class IndexedColorConfig:
     cond_tokens: int = 1
     max_height: int = 128
     max_width: int = 128
+
+
+@dataclass(frozen=True)
+class ConvIndexDenoiserConfig:
+    vocab_size: int = 64
+    structure_vocab_size: int = 128
+    hidden_dim: int = 64
+    depth: int = 2
+    text_dim: int = 64
+
+    @property
+    def mask_token_id(self) -> int:
+        return self.vocab_size
+
+    @property
+    def pad_token_id(self) -> int:
+        return self.vocab_size + 1
 
 
 def palette_mask_from_sizes(sizes: torch.Tensor, max_colors: int = 64) -> torch.Tensor:
@@ -70,18 +87,13 @@ class IndexedColorModel(nn.Module):
         self.size_head = nn.Sequential(nn.Linear(cond_dim, self.config.hidden_dim), nn.GELU(), nn.Linear(self.config.hidden_dim, self.config.max_colors - self.config.min_colors + 1))
         self.palette_head = nn.Sequential(nn.Linear(cond_dim, self.config.hidden_dim), nn.GELU(), nn.Linear(self.config.hidden_dim, self.config.max_colors * 4))
         self.palette_cond = nn.Linear(self.config.max_colors * 4, self.config.text_dim) if self.config.text_dim else None
-        self.index_model = MaskGIT(
-            MaskGITConfig(
+        self.index_model = ConvIndexDenoiser(
+            ConvIndexDenoiserConfig(
                 vocab_size=self.config.max_colors,
+                structure_vocab_size=self.config.structure_vocab_size,
                 hidden_dim=self.config.hidden_dim,
                 depth=self.config.depth,
-                heads=self.config.heads,
-                max_height=self.config.max_height,
-                max_width=self.config.max_width,
                 text_dim=self.config.text_dim,
-                cond_tokens=self.config.cond_tokens,
-                structure_cond=True,
-                structure_vocab_size=self.config.structure_vocab_size,
             )
         )
 
@@ -244,3 +256,63 @@ class IndexedColorModel(nn.Module):
         model = cls(IndexedColorConfig(**checkpoint["config"]))
         model.load_state_dict(checkpoint["state_dict"])
         return model
+
+
+class ConvIndexDenoiser(nn.Module):
+    def __init__(self, config: ConvIndexDenoiserConfig):
+        super().__init__()
+        self.config = config
+        self.token_embed = nn.Embedding(config.vocab_size + 2, config.hidden_dim)
+        self.structure_embed = nn.Embedding(config.structure_vocab_size + 2, config.hidden_dim)
+        self.text_proj = nn.Linear(config.text_dim, config.hidden_dim) if config.text_dim > 0 else None
+        self.input = nn.Conv2d(config.hidden_dim, config.hidden_dim, 3, padding=1)
+        self.blocks = nn.ModuleList([ConvResidualBlock(config.hidden_dim) for _ in range(config.depth)])
+        self.norm = nn.GroupNorm(1, config.hidden_dim)
+        self.head = nn.Conv2d(config.hidden_dim, config.vocab_size, 1)
+
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        valid_mask: torch.Tensor,
+        text_embeddings: torch.Tensor | None = None,
+        structure_condition: torch.Tensor | None = None,
+        cond_drop_prob: float = 0.0,
+    ) -> torch.Tensor:
+        if tokens.shape != valid_mask.shape:
+            raise ValueError("tokens and valid_mask must have the same shape")
+        structure_pad = self.config.structure_vocab_size + 1
+        x_tokens = tokens.clamp(0, self.config.pad_token_id).masked_fill(~valid_mask, self.config.pad_token_id)
+        if structure_condition is None:
+            structure_condition = torch.full_like(tokens, structure_pad)
+        if structure_condition.shape != tokens.shape:
+            raise ValueError("structure_condition must match tokens shape")
+        structure = structure_condition.clamp(0, structure_pad).masked_fill(~valid_mask, structure_pad)
+        x = self.token_embed(x_tokens) + self.structure_embed(structure)
+        if self.text_proj is not None:
+            if text_embeddings is None:
+                text_embeddings = torch.zeros((tokens.shape[0], self.config.text_dim), device=tokens.device)
+            text_embeddings = text_embeddings.to(tokens.device)
+            if cond_drop_prob > 0:
+                keep = torch.rand((tokens.shape[0], 1), device=tokens.device).ge(cond_drop_prob)
+                text_embeddings = text_embeddings * keep
+            x = x + self.text_proj(text_embeddings)[:, None, None, :]
+        x = x.permute(0, 3, 1, 2)
+        x = self.input(x)
+        for block in self.blocks:
+            x = block(x)
+        x = self.head(F.gelu(self.norm(x)))
+        return x.masked_fill(~valid_mask[:, None], -1e9)
+
+
+class ConvResidualBlock(nn.Module):
+    def __init__(self, channels: int):
+        super().__init__()
+        self.norm1 = nn.GroupNorm(1, channels)
+        self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
+        self.norm2 = nn.GroupNorm(1, channels)
+        self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.conv1(F.gelu(self.norm1(x)))
+        y = self.conv2(F.gelu(self.norm2(y)))
+        return x + y

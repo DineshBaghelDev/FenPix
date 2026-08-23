@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fenpix.dataset import BucketBatchSampler, PixelArtDataset, pixel_art_collate
 from fenpix.hierarchy import HierarchicalMaskGIT, HierarchicalMaskGITConfig, stage_tokens_from_batch
-from fenpix.text import FrozenHashTextEncoder, TextEmbeddingCache, TextEncoderConfig
+from fenpix.text import FrozenPretrainedTextEncoder, TextEmbeddingCache, TextEncoderConfig
 from fenpix.tokenizer import StructureTokenizer
 
 
@@ -57,7 +57,7 @@ def _save_stage_grid(samples: dict[int, tuple[torch.Tensor, torch.Tensor]], path
 def train(args: argparse.Namespace) -> dict[str, float]:
     device = torch.device(args.device)
     tokenizer = StructureTokenizer.load_checkpoint(args.tokenizer, map_location=device).to(device).eval()
-    text_encoder = FrozenHashTextEncoder(TextEncoderConfig(dim=args.text_dim))
+    text_encoder = FrozenPretrainedTextEncoder(TextEncoderConfig(dim=args.text_dim, provider=args.text_provider, device=args.device))
     text_cache = TextEmbeddingCache(args.embedding_cache, text_encoder) if args.embedding_cache else None
     dataset = _dataset(args)
     loader = DataLoader(
@@ -124,7 +124,7 @@ def sample(args: argparse.Namespace) -> None:
     prompts = (prompts * ((args.samples + len(prompts) - 1) // len(prompts)))[: args.samples]
     text_embeddings = None
     if model.config.text_dim > 0:
-        text_embeddings = FrozenHashTextEncoder(TextEncoderConfig(dim=model.config.text_dim)).encode(prompts).to(device)
+        text_embeddings = FrozenPretrainedTextEncoder(TextEncoderConfig(dim=model.config.text_dim, provider=args.text_provider, device=args.device)).encode(prompts).to(device)
     samples = model.sample(
         args.width,
         args.height,
@@ -155,6 +155,7 @@ def main() -> None:
     train_parser.add_argument("--depth", type=int, default=2)
     train_parser.add_argument("--heads", type=int, default=4)
     train_parser.add_argument("--text-dim", type=int, default=64)
+    train_parser.add_argument("--text-provider", choices=["clip", "tiny"], default="clip")
     train_parser.add_argument("--cond-tokens", type=int, default=1)
     train_parser.add_argument("--cond-dropout", type=float, default=0.1)
     train_parser.add_argument("--embedding-cache", type=Path, default=Path("runs/m6_text_cache.pt"))
@@ -181,6 +182,7 @@ def main() -> None:
     sample_parser.add_argument("--steps", type=int, default=8)
     sample_parser.add_argument("--temperature", type=float, default=1.0)
     sample_parser.add_argument("--guidance-scale", type=float, default=2.0)
+    sample_parser.add_argument("--text-provider", choices=["clip", "tiny"], default="clip")
     sample_parser.add_argument("--prompts", nargs="*")
     sample_parser.set_defaults(func=sample)
 

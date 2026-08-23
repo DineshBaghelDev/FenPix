@@ -238,6 +238,26 @@ M8 smoke result:
   `runs/m8_gallery.png`; flow refinement stayed disabled by default because it
   did not clearly beat the color baseline overall.
 
+## M8.1: Architecture Hardening
+
+Status: complete
+
+Decision:
+
+- The 128x128 color-index stage uses a small convolutional masked denoiser
+  instead of full-grid attention. Windowed/axial attention and a U-Net were
+  rejected for this pass because the conv denoiser is the smallest O(HW)
+  design that preserves FenPix's discrete palette-index sampling API.
+
+Deliverables:
+
+- Real train/validation/test splits with validation reporting.
+- Normal training excludes `lossy=True` samples unless explicitly included.
+- Frozen CLIP text embeddings replace the toy encoder in normal scripts.
+- Held-out evaluation runs checkpoint-driven generation and reports palette
+  fidelity, transparency IoU, boundary F1, connected components, grid
+  alignment, and CLIP text-image alignment.
+
 ## M9: Teacher And Distillation
 
 Status: later

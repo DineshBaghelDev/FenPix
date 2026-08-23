@@ -42,6 +42,18 @@ class IndexedColorTest(unittest.TestCase):
         self.assertTrue(out["indices"].ge(0).all())
         self.assertTrue((out["indices"] < out["palette_size"][:, None, None]).all())
 
+    def test_index_denoiser_is_convolutional_and_scales_to_128(self):
+        model = IndexedColorModel(IndexedColorConfig(max_colors=8, min_colors=8, structure_vocab_size=4, hidden_dim=8, depth=1, heads=4, text_dim=4))
+        structure = torch.randint(0, 4, (1, 128, 128))
+        valid = torch.ones_like(structure, dtype=torch.bool)
+        tokens = torch.full_like(structure, model.index_model.config.mask_token_id)
+        palette = torch.ones((1, 8), dtype=torch.bool)
+
+        logits = model.index_logits(tokens, valid, structure, torch.randn(1, 4), torch.zeros((1, 8, 4), dtype=torch.uint8), palette)
+
+        self.assertEqual(logits.shape, (1, 8, 128, 128))
+        self.assertFalse(any(isinstance(module, torch.nn.TransformerEncoder) for module in model.index_model.modules()))
+
     def test_alpha_transparency_is_explicit(self):
         logits = torch.zeros((1, 8, 4))
         logits[:, 0, 3] = -20

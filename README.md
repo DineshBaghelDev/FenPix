@@ -129,14 +129,15 @@ writes `report.json`.
 ## Quality Baseline
 
 ```bash
-python scripts/evaluate_quality.py data\processed --metrics runs\m8_metrics.json --gallery runs\m8_gallery.png
+python scripts\evaluate_quality.py data\processed --tokenizer runs\m3_structure_tokenizer.pt --color-checkpoint runs\m8_1_color.pt --use-heldout-structure --metrics runs\m8_1_metrics.json --gallery runs\m8_1_gallery.png
 ```
 
-M8 evaluates a fixed prompt set across sprites, icons, tiles, objects,
-buildings, scenes, isometric art, and transparency. It reports structure,
-index, palette, transparency, edge/detail, text-alignment, and latency metrics,
-then compares the color baseline with 1/2/4 flow-refiner steps. Flow refinement
-stays disabled unless it clearly beats the baseline.
+M8.1 evaluates true held-out generation from a color checkpoint. It uses frozen
+CLIP text embeddings and CLIP image/text similarity, defaults training to
+lossless samples only, and reports palette fidelity, transparency IoU, boundary
+F1, connected-component consistency, grid alignment, text-image alignment, split
+counts, and latency. `--use-heldout-structure` is an explicit smoke fallback
+when no trained hierarchy checkpoint is being evaluated.
 
 ## Roadmap
 

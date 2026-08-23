@@ -11,8 +11,7 @@ import torch
 from PIL import Image, ImageDraw
 
 from .color import reconstruct_indexed_png
-from .refiner import PaletteLogitFlowRefiner, compare_refinement
-from .text import FrozenPretrainedTextEncoder, TextEncoderConfig
+from .text import FrozenVisionLanguageEncoder, TextEncoderConfig
 
 
 PROMPT_EVAL_SET = (
@@ -29,92 +28,119 @@ PROMPT_EVAL_SET = (
 
 @dataclass(frozen=True)
 class QualityMetrics:
-    structure_accuracy: float
-    index_accuracy: float
-    palette_validity: float
-    transparency_accuracy: float
-    edge_detail_score: float
+    palette_fidelity: float
+    transparency_iou: float
+    boundary_f1: float
+    connected_component_consistency: float
+    grid_pixel_alignment: float
     text_image_alignment: float
     inference_latency_ms: float
 
 
-def edge_detail_score(pred: torch.Tensor, target: torch.Tensor, valid: torch.Tensor) -> float:
-    target_h = target[:, 1:] != target[:, :-1]
-    pred_h = pred[:, 1:] != pred[:, :-1]
-    valid_h = valid[:, 1:] & valid[:, :-1]
-    target_w = target[:, :, 1:] != target[:, :, :-1]
-    pred_w = pred[:, :, 1:] != pred[:, :, :-1]
-    valid_w = valid[:, :, 1:] & valid[:, :, :-1]
-    hits = pred_h.eq(target_h).logical_and(valid_h).float().sum()
-    hits = hits + pred_w.eq(target_w).logical_and(valid_w).float().sum()
-    total = valid_h.float().sum() + valid_w.float().sum()
-    return float((hits / total.clamp_min(1)).item())
+def _to_numpy_rgba(image: Image.Image | np.ndarray) -> np.ndarray:
+    return np.asarray(image.convert("RGBA") if isinstance(image, Image.Image) else image, dtype=np.uint8)
 
 
-def text_image_alignment(prompts: list[str], metadata: list[dict[str, Any]], dim: int = 64) -> float:
-    targets = []
-    for meta, prompt in zip(metadata, prompts):
-        targets.append(str(meta.get("caption") or meta.get("category") or Path(str(meta.get("path", prompt))).stem))
-    encoder = FrozenPretrainedTextEncoder(TextEncoderConfig(dim=dim))
-    return float((encoder.encode(prompts) * encoder.encode(targets)).sum(1).mean().item())
+def _alpha_mask(rgba: np.ndarray) -> np.ndarray:
+    return rgba[..., 3] >= 128
+
+
+def palette_fidelity(pred_rgba: np.ndarray, target_rgba: np.ndarray) -> float:
+    pred_colors = np.unique(pred_rgba.reshape(-1, 4), axis=0).astype(np.float32)
+    target_colors = np.unique(target_rgba.reshape(-1, 4), axis=0).astype(np.float32)
+    if len(pred_colors) == 0 or len(target_colors) == 0:
+        return 1.0
+    distances = np.sqrt(((pred_colors[:, None] - target_colors[None]) ** 2).sum(axis=2))
+    return float(np.clip(1.0 - distances.min(axis=1).mean() / 510.0, 0.0, 1.0))
+
+
+def transparency_iou(pred_rgba: np.ndarray, target_rgba: np.ndarray) -> float:
+    pred = _alpha_mask(pred_rgba)
+    target = _alpha_mask(target_rgba)
+    union = np.logical_or(pred, target).sum()
+    if union == 0:
+        return 1.0
+    return float(np.logical_and(pred, target).sum() / union)
+
+
+def _boundary(mask: np.ndarray) -> np.ndarray:
+    edge = np.zeros_like(mask, dtype=bool)
+    edge[1:] |= mask[1:] != mask[:-1]
+    edge[:-1] |= mask[1:] != mask[:-1]
+    edge[:, 1:] |= mask[:, 1:] != mask[:, :-1]
+    edge[:, :-1] |= mask[:, 1:] != mask[:, :-1]
+    return edge
+
+
+def boundary_f1(pred_rgba: np.ndarray, target_rgba: np.ndarray) -> float:
+    pred = _boundary(_alpha_mask(pred_rgba))
+    target = _boundary(_alpha_mask(target_rgba))
+    tp = np.logical_and(pred, target).sum()
+    fp = np.logical_and(pred, ~target).sum()
+    fn = np.logical_and(~pred, target).sum()
+    denom = 2 * tp + fp + fn
+    return float(1.0 if denom == 0 else (2 * tp) / denom)
+
+
+def _component_count(mask: np.ndarray) -> int:
+    seen = np.zeros_like(mask, dtype=bool)
+    count = 0
+    height, width = mask.shape
+    for y in range(height):
+        for x in range(width):
+            if seen[y, x] or not mask[y, x]:
+                continue
+            count += 1
+            stack = [(y, x)]
+            seen[y, x] = True
+            while stack:
+                cy, cx = stack.pop()
+                for ny, nx in ((cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)):
+                    if 0 <= ny < height and 0 <= nx < width and mask[ny, nx] and not seen[ny, nx]:
+                        seen[ny, nx] = True
+                        stack.append((ny, nx))
+    return count
+
+
+def connected_component_consistency(pred_rgba: np.ndarray, target_rgba: np.ndarray) -> float:
+    pred = _component_count(_alpha_mask(pred_rgba))
+    target = _component_count(_alpha_mask(target_rgba))
+    return float(1.0 - abs(pred - target) / max(pred, target, 1))
+
+
+def grid_pixel_alignment(pred_rgba: np.ndarray) -> float:
+    alpha = pred_rgba[..., 3]
+    hard_alpha = np.logical_or(alpha == 0, alpha == 255).mean()
+    integer_rgba = (pred_rgba == pred_rgba.round()).mean()
+    return float((hard_alpha + integer_rgba) / 2)
+
+
+def text_image_alignment(prompts: list[str], images: list[Image.Image], encoder: FrozenVisionLanguageEncoder | None = None) -> float:
+    encoder = encoder or FrozenVisionLanguageEncoder(TextEncoderConfig())
+    text = encoder.encode(prompts)
+    image = encoder.encode_images(images)
+    return float((text * image).sum(1).mean().item())
 
 
 def compute_quality_metrics(
-    logits: torch.Tensor,
-    indices: torch.Tensor,
-    valid_mask: torch.Tensor,
-    palette_mask: torch.Tensor,
+    pred_images: list[Image.Image | np.ndarray],
+    target_images: list[Image.Image | np.ndarray],
     prompts: list[str],
-    metadata: list[dict[str, Any]],
     *,
-    structure_tokens: torch.Tensor | None = None,
+    encoder: FrozenVisionLanguageEncoder | None = None,
+    latency_ms: float = 0.0,
 ) -> QualityMetrics:
-    start = perf_counter()
-    pred = logits.argmax(dim=1).masked_fill(~valid_mask, -1)
-    latency_ms = (perf_counter() - start) * 1000
-    total = valid_mask.float().sum().clamp_min(1)
-    index_accuracy = pred.eq(indices).logical_and(valid_mask).float().sum() / total
-    structure = structure_tokens if structure_tokens is not None else indices
-    structure_accuracy = pred.eq(structure).logical_and(valid_mask).float().sum() / total
-    palette_sizes = palette_mask.sum(1)[:, None, None].to(pred.device)
-    palette_valid = (pred.ge(0) & pred.lt(palette_sizes)).logical_or(~valid_mask)
-    transparent_target = indices.eq(0) & valid_mask
-    transparent_pred = pred.eq(0) & valid_mask
-    transparency = transparent_pred.eq(transparent_target).logical_and(valid_mask).float().sum() / total
+    pred = [_to_numpy_rgba(image) for image in pred_images]
+    target = [_to_numpy_rgba(image) for image in target_images]
     return QualityMetrics(
-        structure_accuracy=float(structure_accuracy.item()),
-        index_accuracy=float(index_accuracy.item()),
-        palette_validity=float(palette_valid.float().mean().item()),
-        transparency_accuracy=float(transparency.item()),
-        edge_detail_score=edge_detail_score(pred, indices, valid_mask),
-        text_image_alignment=text_image_alignment(prompts, metadata, logits.shape[1]),
+        palette_fidelity=float(np.mean([palette_fidelity(p, t) for p, t in zip(pred, target)])),
+        transparency_iou=float(np.mean([transparency_iou(p, t) for p, t in zip(pred, target)])),
+        boundary_f1=float(np.mean([boundary_f1(p, t) for p, t in zip(pred, target)])),
+        connected_component_consistency=float(np.mean([connected_component_consistency(p, t) for p, t in zip(pred, target)])),
+        grid_pixel_alignment=float(np.mean([grid_pixel_alignment(p) for p in pred])),
+        text_image_alignment=text_image_alignment(prompts, [Image.fromarray(p, "RGBA") for p in pred], encoder),
         inference_latency_ms=latency_ms,
     )
-
-
-def compare_color_and_refiner(
-    base_logits: torch.Tensor,
-    indices: torch.Tensor,
-    valid_mask: torch.Tensor,
-    structure_tokens: torch.Tensor,
-    text_embeddings: torch.Tensor | None,
-    palette: torch.Tensor,
-    palette_mask: torch.Tensor,
-    prompts: list[str],
-    metadata: list[dict[str, Any]],
-    refiner: PaletteLogitFlowRefiner | None = None,
-    steps: tuple[int, ...] = (1, 2, 4),
-) -> dict[str, Any]:
-    baseline = compute_quality_metrics(base_logits, indices, valid_mask, palette_mask, prompts, metadata, structure_tokens=structure_tokens)
-    out: dict[str, Any] = {"baseline_color": baseline.__dict__}
-    if refiner is not None:
-        for step_count, raw in compare_refinement(refiner, base_logits, indices, valid_mask, structure_tokens, text_embeddings, palette, palette_mask, steps=steps).items():
-            out[f"flow_refiner_{step_count}"] = compute_quality_metrics(raw["logits"], indices, valid_mask, palette_mask, prompts, metadata, structure_tokens=structure_tokens).__dict__ | {
-                "inference_latency_ms": raw["latency_ms"]
-            }
-    best = max(out, key=lambda key: out[key]["index_accuracy"] + out[key]["edge_detail_score"] + out[key]["text_image_alignment"])
-    out["flow_refinement_default"] = best if best != "baseline_color" and out[best]["index_accuracy"] >= baseline.index_accuracy + 0.02 else "disabled"
-    return out
 
 
 def save_metrics(metrics: dict[str, Any], path: str | Path) -> None:
@@ -124,29 +150,40 @@ def save_metrics(metrics: dict[str, Any], path: str | Path) -> None:
 
 
 def save_comparison_gallery(
-    outputs: dict[str, torch.Tensor],
-    palette: torch.Tensor,
-    palette_mask: torch.Tensor,
+    targets: list[Image.Image | np.ndarray],
+    generated: list[Image.Image | np.ndarray],
     path: str | Path,
     prompts: list[str],
     max_items: int = 8,
 ) -> None:
-    names = list(outputs)
     rows = []
     font_h = 14
-    for row in range(min(max_items, next(iter(outputs.values())).shape[0])):
-        panels = []
-        for name in names:
-            row_palette = palette[row][palette_mask[row]]
-            row_indices = outputs[name][row].clamp(0, max(0, len(row_palette) - 1))
-            image = reconstruct_indexed_png(row_indices, row_palette)
-            panels.append(np.asarray(image, dtype=np.uint8))
-        strip = np.concatenate(panels, axis=1)
+    for row in range(min(max_items, len(generated))):
+        target = _to_numpy_rgba(targets[row])
+        pred = _to_numpy_rgba(generated[row])
+        strip = np.concatenate([target, pred], axis=1)
         label = Image.new("RGBA", (strip.shape[1], font_h), (255, 255, 255, 255))
-        draw = ImageDraw.Draw(label)
-        draw.text((2, 1), prompts[row % len(prompts)][:80], fill=(0, 0, 0, 255))
+        ImageDraw.Draw(label).text((2, 1), prompts[row % len(prompts)][:80], fill=(0, 0, 0, 255))
         rows.append(np.concatenate([np.asarray(label), strip], axis=0))
     canvas = np.concatenate(rows, axis=0)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(canvas.astype(np.uint8), "RGBA").save(path)
+
+
+def render_indexed_batch(indices: torch.Tensor, palette: torch.Tensor, palette_mask: torch.Tensor, valid_mask: torch.Tensor) -> list[Image.Image]:
+    images = []
+    for row in range(indices.shape[0]):
+        valid = valid_mask[row].detach().cpu()
+        h = int(valid.any(1).sum().item())
+        w = int(valid.any(0).sum().item())
+        row_palette = palette[row][palette_mask[row]]
+        row_indices = indices[row, :h, :w].detach().cpu().masked_fill(~valid[:h, :w], 0)
+        images.append(reconstruct_indexed_png(row_indices, row_palette))
+    return images
+
+
+def timed(fn):
+    start = perf_counter()
+    value = fn()
+    return value, (perf_counter() - start) * 1000

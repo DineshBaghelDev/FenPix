@@ -16,7 +16,7 @@ from fenpix.color import IndexedColorModel, reconstruct_indexed_png
 from fenpix.dataset import BucketBatchSampler, PixelArtDataset, pixel_art_collate
 from fenpix.hierarchy import HierarchicalMaskGIT, condition_to_shape, stage_tokens_from_batch
 from fenpix.refiner import FlowRefinerConfig, PaletteLogitFlowRefiner, compare_refinement
-from fenpix.text import FrozenHashTextEncoder, TextEmbeddingCache, TextEncoderConfig
+from fenpix.text import FrozenPretrainedTextEncoder, TextEmbeddingCache, TextEncoderConfig
 from fenpix.tokenizer import StructureTokenizer
 
 
@@ -76,7 +76,7 @@ def train(args: argparse.Namespace) -> dict[str, float]:
     device = torch.device(args.device)
     tokenizer = StructureTokenizer.load_checkpoint(args.tokenizer, map_location=device).to(device).eval()
     color = IndexedColorModel.load_checkpoint(args.color_checkpoint, map_location=device).to(device).eval()
-    text_encoder = FrozenHashTextEncoder(TextEncoderConfig(dim=color.config.text_dim))
+    text_encoder = FrozenPretrainedTextEncoder(TextEncoderConfig(dim=color.config.text_dim, provider=args.text_provider, device=args.device))
     text_cache = TextEmbeddingCache(args.embedding_cache, text_encoder) if args.embedding_cache else None
     dataset = _dataset(args)
     loader = DataLoader(dataset, batch_sampler=BucketBatchSampler(dataset, args.batch_size, seed=args.seed), collate_fn=pixel_art_collate)
@@ -130,7 +130,7 @@ def evaluate(args: argparse.Namespace, refiner=None, color=None, tokenizer=None,
     tokenizer = tokenizer or StructureTokenizer.load_checkpoint(args.tokenizer, map_location=device).to(device).eval()
     color = color or IndexedColorModel.load_checkpoint(args.color_checkpoint, map_location=device).to(device).eval()
     refiner = refiner or PaletteLogitFlowRefiner.load_checkpoint(args.checkpoint, map_location=device).to(device).eval()
-    text_encoder = text_encoder or FrozenHashTextEncoder(TextEncoderConfig(dim=color.config.text_dim))
+    text_encoder = text_encoder or FrozenPretrainedTextEncoder(TextEncoderConfig(dim=color.config.text_dim, provider=args.text_provider, device=args.device))
     if loader is None:
         dataset = _dataset(args)
         loader = DataLoader(dataset, batch_sampler=BucketBatchSampler(dataset, args.batch_size, seed=args.seed), collate_fn=pixel_art_collate)
@@ -179,7 +179,7 @@ def sample(args: argparse.Namespace) -> None:
     refiner = PaletteLogitFlowRefiner.load_checkpoint(args.checkpoint, map_location=device).to(device).eval()
     prompts = args.prompts or ["pixel art"]
     prompts = (prompts * ((args.samples + len(prompts) - 1) // len(prompts)))[: args.samples]
-    text = FrozenHashTextEncoder(TextEncoderConfig(dim=color.config.text_dim)).encode(prompts).to(device) if color.config.text_dim else None
+    text = FrozenPretrainedTextEncoder(TextEncoderConfig(dim=color.config.text_dim, provider=args.text_provider, device=args.device)).encode(prompts).to(device) if color.config.text_dim else None
 
     if args.hierarchy:
         hierarchy = HierarchicalMaskGIT.load_checkpoint(args.hierarchy, map_location=device).to(device).eval()
@@ -209,6 +209,7 @@ def main() -> None:
         p.add_argument("--checkpoint", type=Path, default=Path("runs/m7_refiner.pt"))
         p.add_argument("--device", default="cpu")
         p.add_argument("--guidance-scale", type=float, default=2.0)
+        p.add_argument("--text-provider", choices=["clip", "tiny"], default="clip")
 
     train_parser = sub.add_parser("train")
     train_parser.add_argument("data", type=Path)
