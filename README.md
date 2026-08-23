@@ -72,6 +72,8 @@ Variable sizes are preserved, so use `pixel_art_collate` when batching.
 
 ## Roadmap
 
+See [MILESTONES.md](MILESTONES.md) for the full milestone map.
+
 1. Dataset pipeline
 2. Palette extraction + indexing
 3. Structure tokenizer/VQ
