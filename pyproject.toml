@@ -1,0 +1,13 @@
+[project]
+name = "fenpix"
+version = "0.1.0"
+description = "Tiny pixel-art representation pipeline."
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "pillow>=10",
+  "torch>=2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
