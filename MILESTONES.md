@@ -147,21 +147,23 @@ Done when:
 
 ## M5: Text Conditioning
 
-Status: planned
+Status: complete
 
 Goal: make prompts control category, object, style, and composition.
 
 Deliverables:
 
-- Frozen small text encoder.
-- Precomputed text embeddings.
-- Cross-attention or conditioning tokens.
+- Frozen small hash text encoder.
+- Precomputed/cached text embeddings.
+- Conditioning tokens.
 - Caption/category training fields.
+- Classifier-free guidance.
 
 Done when:
 
-- Prompts like `red potion icon`, `isometric stone house`, and `grass tile`
-  produce visibly different outputs.
+- Prompts like `red potion icon`, `stone house`, `grass tile`, and `small tree`
+  intentionally overfit to visibly different structure maps on a tiny
+  captioned dataset.
 
 ## M6: Hierarchical Generation
 

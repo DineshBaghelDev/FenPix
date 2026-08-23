@@ -9,16 +9,20 @@ from .tokenizer import (
     tokenizer_metrics,
 )
 from .maskgit import MaskGIT, MaskGITConfig, maskgit_loss, random_mask_tokens
+from .text import FrozenHashTextEncoder, TextEmbeddingCache, TextEncoderConfig
 
 __all__ = [
     "BucketBatchSampler",
     "PaletteEncoding",
     "PixelArtDataset",
+    "FrozenHashTextEncoder",
     "MaskGIT",
     "MaskGITConfig",
     "StructureTokenizer",
     "StructureTokenizerConfig",
     "StructureEncoding",
+    "TextEmbeddingCache",
+    "TextEncoderConfig",
     "bucket_id",
     "canonical_structure_indices",
     "extract_palette",

@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fenpix.dataset import PixelArtDataset, pixel_art_collate
 from fenpix.maskgit import MaskGIT, MaskGITConfig, maskgit_loss, random_mask_tokens
+from fenpix.text import FrozenHashTextEncoder, TextEmbeddingCache, TextEncoderConfig
 from fenpix.tokenizer import StructureTokenizer, canonical_structure_indices, structure_one_hot
 
 
@@ -53,6 +54,15 @@ def _save_token_grid(tokens: torch.Tensor, valid: torch.Tensor, path: Path, voca
     Image.fromarray(canvas.numpy(), "L").save(path)
 
 
+def _captions(batch) -> list[str]:
+    out = []
+    for meta in batch["metadata"]:
+        caption = meta.get("caption") or meta.get("category") or "pixel art"
+        category = meta.get("category")
+        out.append(f"{caption} {category}".strip() if category and category not in str(caption) else str(caption))
+    return out
+
+
 def _dataset(args: argparse.Namespace):
     dataset = PixelArtDataset(args.data, max_colors=args.max_colors, cache=args.cache)
     keep = [i for i in range(len(dataset)) if int(dataset[i]["bucket_size"]) == 32]
@@ -66,6 +76,8 @@ def _dataset(args: argparse.Namespace):
 def train(args: argparse.Namespace) -> dict[str, float]:
     device = torch.device(args.device)
     tokenizer = StructureTokenizer.load_checkpoint(args.tokenizer, map_location=device).to(device).eval()
+    text_encoder = FrozenHashTextEncoder(TextEncoderConfig(dim=args.text_dim))
+    text_cache = TextEmbeddingCache(args.embedding_cache, text_encoder) if args.embedding_cache else None
     loader = DataLoader(_dataset(args), batch_size=args.batch_size, shuffle=True, collate_fn=pixel_art_collate)
     first_tokens, _ = _tokens_from_batch(next(iter(loader)), tokenizer, device)
     config = MaskGITConfig(
@@ -75,6 +87,8 @@ def train(args: argparse.Namespace) -> dict[str, float]:
         heads=args.heads,
         max_height=max(args.max_grid, first_tokens.shape[-2]),
         max_width=max(args.max_grid, first_tokens.shape[-1]),
+        text_dim=args.text_dim,
+        cond_tokens=args.cond_tokens,
     )
     model = MaskGIT(config).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -86,8 +100,10 @@ def train(args: argparse.Namespace) -> dict[str, float]:
         model.train()
         for batch in loader:
             tokens, valid = _tokens_from_batch(batch, tokenizer, device)
+            texts = _captions(batch)
+            text_embeddings = (text_cache.encode(texts) if text_cache else text_encoder.encode(texts)).to(device)
             masked, labels = random_mask_tokens(tokens, valid, config.mask_token_id)
-            loss = maskgit_loss(model(masked, valid), labels)
+            loss = maskgit_loss(model(masked, valid, text_embeddings, cond_drop_prob=args.cond_dropout), labels)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
@@ -103,7 +119,10 @@ def train(args: argparse.Namespace) -> dict[str, float]:
         model.eval()
         with torch.no_grad():
             valid = torch.ones((args.samples, first_tokens.shape[-2], first_tokens.shape[-1]), dtype=torch.bool, device=device)
-            samples = model.sample(tuple(valid.shape), valid, steps=args.sample_steps)
+            prompts = (args.prompts or ["red potion icon", "stone house", "grass tile", "small tree"])[: args.samples]
+            prompts = (prompts * ((args.samples + len(prompts) - 1) // len(prompts)))[: args.samples]
+            text_embeddings = text_encoder.encode(prompts).to(device)
+            samples = model.sample(tuple(valid.shape), valid, steps=args.sample_steps, text_embeddings=text_embeddings, guidance_scale=args.guidance_scale)
         _save_token_grid(samples, valid, Path(args.viz), config.vocab_size)
     return last
 
@@ -111,8 +130,20 @@ def train(args: argparse.Namespace) -> dict[str, float]:
 def sample(args: argparse.Namespace) -> None:
     device = torch.device(args.device)
     model = MaskGIT.load_checkpoint(args.checkpoint, map_location=device).to(device).eval()
-    valid = torch.ones((args.samples, args.height, args.width), dtype=torch.bool, device=device)
-    tokens = model.sample(tuple(valid.shape), valid, steps=args.steps, temperature=args.temperature)
+    prompts = args.prompts or ["red potion icon", "stone house", "grass tile", "small tree"]
+    prompts = (prompts * ((args.samples + len(prompts) - 1) // len(prompts)))[: args.samples]
+    valid = torch.ones((len(prompts), args.height, args.width), dtype=torch.bool, device=device)
+    text_embeddings = None
+    if model.config.text_dim > 0:
+        text_embeddings = FrozenHashTextEncoder(TextEncoderConfig(dim=model.config.text_dim)).encode(prompts).to(device)
+    tokens = model.sample(
+        tuple(valid.shape),
+        valid,
+        steps=args.steps,
+        temperature=args.temperature,
+        text_embeddings=text_embeddings,
+        guidance_scale=args.guidance_scale,
+    )
     _save_token_grid(tokens, valid, args.out, model.config.vocab_size, max_items=args.samples)
 
 
@@ -123,8 +154,8 @@ def main() -> None:
     train_parser = sub.add_parser("train")
     train_parser.add_argument("data", type=Path)
     train_parser.add_argument("--tokenizer", type=Path, required=True)
-    train_parser.add_argument("--checkpoint", type=Path, default=Path("runs/m4_maskgit.pt"))
-    train_parser.add_argument("--viz", type=Path, default=Path("runs/m4_samples.png"))
+    train_parser.add_argument("--checkpoint", type=Path, default=Path("runs/m5_maskgit.pt"))
+    train_parser.add_argument("--viz", type=Path, default=Path("runs/m5_samples.png"))
     train_parser.add_argument("--device", default="cpu")
     train_parser.add_argument("--epochs", type=int, default=20)
     train_parser.add_argument("--batch-size", type=int, default=8)
@@ -134,21 +165,29 @@ def main() -> None:
     train_parser.add_argument("--depth", type=int, default=4)
     train_parser.add_argument("--heads", type=int, default=4)
     train_parser.add_argument("--max-grid", type=int, default=32)
+    train_parser.add_argument("--text-dim", type=int, default=64)
+    train_parser.add_argument("--cond-tokens", type=int, default=1)
+    train_parser.add_argument("--cond-dropout", type=float, default=0.1)
+    train_parser.add_argument("--embedding-cache", type=Path, default=Path("runs/m5_text_cache.pt"))
     train_parser.add_argument("--lr", type=float, default=3e-4)
     train_parser.add_argument("--samples", type=int, default=16)
     train_parser.add_argument("--sample-steps", type=int, default=8)
+    train_parser.add_argument("--guidance-scale", type=float, default=2.0)
+    train_parser.add_argument("--prompts", nargs="*")
     train_parser.add_argument("--cache", action="store_true")
     train_parser.set_defaults(func=train)
 
     sample_parser = sub.add_parser("sample")
     sample_parser.add_argument("--checkpoint", type=Path, required=True)
-    sample_parser.add_argument("--out", type=Path, default=Path("runs/m4_samples.png"))
+    sample_parser.add_argument("--out", type=Path, default=Path("runs/m5_samples.png"))
     sample_parser.add_argument("--device", default="cpu")
     sample_parser.add_argument("--samples", type=int, default=16)
     sample_parser.add_argument("--height", type=int, default=8)
     sample_parser.add_argument("--width", type=int, default=8)
     sample_parser.add_argument("--steps", type=int, default=8)
     sample_parser.add_argument("--temperature", type=float, default=1.0)
+    sample_parser.add_argument("--guidance-scale", type=float, default=2.0)
+    sample_parser.add_argument("--prompts", nargs="*")
     sample_parser.set_defaults(func=sample)
 
     args = parser.parse_args()

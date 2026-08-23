@@ -66,6 +66,15 @@ class MaskGITTest(unittest.TestCase):
         self.assertTrue(samples[valid].lt(6).all())
         self.assertTrue(samples[~valid].eq(model.config.pad_token_id).all())
 
+    def test_iterative_decoding_accepts_guidance(self):
+        model = MaskGIT(MaskGITConfig(vocab_size=6, hidden_dim=16, depth=1, heads=4, max_height=2, max_width=2, text_dim=8))
+        valid = torch.ones((1, 2, 2), dtype=torch.bool)
+        text = torch.randn(1, 8)
+
+        samples = model.sample((1, 2, 2), valid, steps=2, text_embeddings=text, guidance_scale=2)
+
+        self.assertEqual(samples.shape, (1, 2, 2))
+
     def test_tiny_dataset_overfit(self):
         torch.manual_seed(0)
         tokens = torch.tensor([[[1, 1, 2, 2], [1, 1, 2, 2], [3, 3, 4, 4], [3, 3, 4, 4]]])

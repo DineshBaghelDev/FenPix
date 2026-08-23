@@ -19,6 +19,8 @@ class MaskGITConfig:
     dropout: float = 0.0
     max_height: int = 32
     max_width: int = 32
+    text_dim: int = 0
+    cond_tokens: int = 1
 
     @property
     def mask_token_id(self) -> int:
@@ -76,6 +78,11 @@ class MaskGIT(nn.Module):
         self.token_embed = nn.Embedding(self.config.vocab_size + 2, self.config.hidden_dim)
         self.row_embed = nn.Embedding(self.config.max_height, self.config.hidden_dim)
         self.col_embed = nn.Embedding(self.config.max_width, self.config.hidden_dim)
+        self.cond_proj = (
+            nn.Linear(self.config.text_dim, self.config.cond_tokens * self.config.hidden_dim)
+            if self.config.text_dim > 0
+            else None
+        )
         layer = nn.TransformerEncoderLayer(
             d_model=self.config.hidden_dim,
             nhead=self.config.heads,
@@ -89,7 +96,13 @@ class MaskGIT(nn.Module):
         self.norm = nn.LayerNorm(self.config.hidden_dim)
         self.head = nn.Linear(self.config.hidden_dim, self.config.vocab_size)
 
-    def forward(self, tokens: torch.Tensor, valid_mask: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        valid_mask: torch.Tensor,
+        text_embeddings: torch.Tensor | None = None,
+        cond_drop_prob: float = 0.0,
+    ) -> torch.Tensor:
         if tokens.shape != valid_mask.shape:
             raise ValueError("tokens and valid_mask must have the same shape")
         batch, height, width = tokens.shape
@@ -103,7 +116,18 @@ class MaskGIT(nn.Module):
         x = x + self.row_embed(rows)[None, :, None, :] + self.col_embed(cols)[None, None, :, :]
         x = x.reshape(batch, height * width, self.config.hidden_dim)
         padding = ~valid_mask.reshape(batch, height * width)
+        if self.cond_proj is not None:
+            if text_embeddings is None:
+                text_embeddings = torch.zeros((batch, self.config.text_dim), device=tokens.device)
+            text_embeddings = text_embeddings.to(tokens.device)
+            if cond_drop_prob > 0:
+                keep = torch.rand((batch, 1), device=tokens.device).ge(cond_drop_prob)
+                text_embeddings = text_embeddings * keep
+            cond = self.cond_proj(text_embeddings).reshape(batch, self.config.cond_tokens, self.config.hidden_dim)
+            x = torch.cat([cond, x], dim=1)
+            padding = torch.cat([torch.zeros((batch, self.config.cond_tokens), dtype=torch.bool, device=tokens.device), padding], dim=1)
         x = self.transformer(x, src_key_padding_mask=padding)
+        x = x[:, -height * width :]
         logits = self.head(self.norm(x)).reshape(batch, height, width, self.config.vocab_size)
         return logits.permute(0, 3, 1, 2)
 
@@ -114,6 +138,8 @@ class MaskGIT(nn.Module):
         valid_mask: torch.Tensor | None = None,
         steps: int = 8,
         temperature: float = 1.0,
+        text_embeddings: torch.Tensor | None = None,
+        guidance_scale: float = 1.0,
         generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         batch, height, width = shape
@@ -126,7 +152,11 @@ class MaskGIT(nn.Module):
             still_masked = tokens.eq(self.config.mask_token_id) & valid
             if not still_masked.any():
                 break
-            probs = (self(tokens, valid).clamp(-50, 50) / max(temperature, 1e-6)).softmax(dim=1)
+            logits = self(tokens, valid, text_embeddings)
+            if text_embeddings is not None and guidance_scale != 1.0:
+                uncond = self(tokens, valid, None)
+                logits = uncond + (logits - uncond) * guidance_scale
+            probs = (logits.clamp(-50, 50) / max(temperature, 1e-6)).softmax(dim=1)
             sampled = torch.multinomial(probs.permute(0, 2, 3, 1).reshape(-1, self.config.vocab_size), 1, generator=generator)
             sampled = sampled.reshape(batch, height, width)
             confidence = probs.gather(1, sampled[:, None]).squeeze(1).masked_fill(~still_masked, -1)

@@ -45,10 +45,17 @@ so structure stays separate from semantic color.
 
 ```bash
 python scripts/train_maskgit.py train data\processed --tokenizer runs\m3_structure_tokenizer.pt --epochs 20 --limit 32
-python scripts/train_maskgit.py sample --checkpoint runs\m4_maskgit.pt --out runs\m4_samples.png
+python scripts/train_maskgit.py sample --checkpoint runs\m5_maskgit.pt --out runs\m5_samples.png
 ```
 
-M4 is unconditional and uses only 32x32-class M3 structure-token grids.
+M4/M5 use only 32x32-class M3 structure-token grids. M5 adds a frozen tiny hash
+text encoder, cached text embeddings, conditioning tokens, and classifier-free
+guidance:
+
+```bash
+python scripts/train_maskgit.py train data\processed --tokenizer runs\m3_structure_tokenizer.pt --epochs 20 --limit 32 --prompts "red potion icon" "stone house" "grass tile" "small tree"
+python scripts/train_maskgit.py sample --checkpoint runs\m5_maskgit.pt --out runs\m5_prompt_samples.png --prompts "red potion icon" "stone house" "grass tile" "small tree"
+```
 
 ## Dataset Shape
 
@@ -116,7 +123,7 @@ See [MILESTONES.md](MILESTONES.md) for the full milestone map.
 2. Palette extraction + indexing
 3. Structure tokenizer/VQ, separate from color assignment
 4. Unconditional structure-token MaskGIT
-5. Text conditioning
+5. Text-conditioned structure MaskGIT
 6. Variable aspect ratios
 7. Hierarchical 32 -> 64 -> 128 generation
 8. Flow/logit refiner ablation
