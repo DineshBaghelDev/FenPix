@@ -142,6 +142,24 @@ class IndexedColorModel(nn.Module):
         logits = logits.masked_fill(~palette_mask[:, :, None, None].to(logits.device), -1e9)
         return F.cross_entropy(logits.permute(0, 2, 3, 1).reshape(-1, self.config.max_colors), labels.reshape(-1), ignore_index=-100)
 
+    def index_logits(
+        self,
+        tokens: torch.Tensor,
+        valid_mask: torch.Tensor,
+        structure_tokens: torch.Tensor,
+        text_embeddings: torch.Tensor | None,
+        palette: torch.Tensor,
+        palette_mask: torch.Tensor,
+        guidance_scale: float = 1.0,
+    ) -> torch.Tensor:
+        palette, palette_mask = _pad_palette_batch(palette, palette_mask, self.config.max_colors)
+        text = self._index_text(text_embeddings, palette, palette_mask)
+        logits = self.index_model(tokens.clamp_min(0), valid_mask, text, structure_tokens)
+        if text is not None and guidance_scale != 1.0:
+            uncond = self.index_model(tokens.clamp_min(0), valid_mask, None, structure_tokens)
+            logits = uncond + (logits - uncond) * guidance_scale
+        return logits.masked_fill(~palette_mask[:, :, None, None].to(logits.device), -1e9)
+
     def loss(
         self,
         indices: torch.Tensor,
