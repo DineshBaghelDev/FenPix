@@ -36,6 +36,8 @@ class PixelArtDataset(Dataset):
             "palette": torch.from_numpy(encoding.palette).to(torch.uint8),
             "size": torch.tensor([encoding.width, encoding.height], dtype=torch.int32),
             "palette_size": torch.tensor(len(encoding.palette), dtype=torch.int16),
+            "unique_color_count": torch.tensor(encoding.unique_color_count, dtype=torch.int16),
+            "lossy": encoding.lossy,
             "metadata": metadata,
         }
 

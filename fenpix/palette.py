@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from PIL import Image
@@ -10,11 +11,43 @@ RGBA = tuple[int, int, int, int]
 
 
 @dataclass(frozen=True)
-class PaletteEncoding:
+class StructureEncoding:
     indices: np.ndarray
-    palette: np.ndarray
     width: int
     height: int
+    metadata: dict[str, Any]
+    lossy: bool
+    unique_color_count: int
+
+
+@dataclass(frozen=True)
+class PaletteEncoding:
+    structure: StructureEncoding
+    palette: np.ndarray
+
+    @property
+    def indices(self) -> np.ndarray:
+        return self.structure.indices
+
+    @property
+    def width(self) -> int:
+        return self.structure.width
+
+    @property
+    def height(self) -> int:
+        return self.structure.height
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        return self.structure.metadata
+
+    @property
+    def lossy(self) -> bool:
+        return self.structure.lossy
+
+    @property
+    def unique_color_count(self) -> int:
+        return self.structure.unique_color_count
 
 
 def _as_rgba_array(image: Image.Image) -> np.ndarray:
@@ -49,8 +82,8 @@ def _quantize_rgb(rows: np.ndarray, max_colors: int) -> np.ndarray:
 
 
 def extract_palette(image: Image.Image, max_colors: int = 64) -> np.ndarray:
-    if not 2 <= max_colors <= 256:
-        raise ValueError("max_colors must be between 2 and 256")
+    if not 8 <= max_colors <= 64:
+        raise ValueError("max_colors must be between 8 and 64")
 
     rgba = _as_rgba_array(image).reshape(-1, 4)
     transparent = rgba[:, 3] == 0
@@ -74,9 +107,11 @@ def image_to_indices(image: Image.Image, max_colors: int = 64) -> PaletteEncodin
     rgba = _as_rgba_array(image)
     height, width = rgba.shape[:2]
     flat = rgba.reshape(-1, 4)
+    unique_colors = _unique_rows(flat)
     palette = extract_palette(image, max_colors=max_colors)
+    lossy = len(unique_colors) > max_colors
 
-    if len(_unique_rows(flat)) <= max_colors:
+    if not lossy:
         lookup: dict[RGBA, int] = {tuple(color): i for i, color in enumerate(palette.tolist())}
         indices = np.array([lookup[tuple(pixel)] for pixel in flat], dtype=np.int64)
     else:
@@ -84,17 +119,23 @@ def image_to_indices(image: Image.Image, max_colors: int = 64) -> PaletteEncodin
         candidate_indices = np.arange(len(palette), dtype=np.int64)
         if transparent_index is not None:
             candidate_indices = candidate_indices[1:]
-        visible_palette = palette[candidate_indices, :3].astype(np.int16)
-        distances = ((flat[:, None, :3].astype(np.int16) - visible_palette[None, :, :]) ** 2).sum(axis=2)
+        visible_palette = palette[candidate_indices, :3].astype(np.int32)
+        distances = ((flat[:, None, :3].astype(np.int32) - visible_palette[None, :, :]) ** 2).sum(axis=2)
         indices = candidate_indices[distances.argmin(axis=1)]
         if transparent_index is not None:
             indices[flat[:, 3] == 0] = transparent_index
 
+    metadata = dict(image.info)
     return PaletteEncoding(
-        indices=indices.reshape(height, width),
+        structure=StructureEncoding(
+            indices=indices.reshape(height, width),
+            width=width,
+            height=height,
+            metadata=metadata,
+            lossy=lossy,
+            unique_color_count=len(unique_colors),
+        ),
         palette=palette,
-        width=width,
-        height=height,
     )
 
 

@@ -28,7 +28,7 @@ assignment should stay separable where possible.
 
 ## M0: Representation Pipeline
 
-Status: started
+Status: complete
 
 Goal: prove every image can become model-ready data and reconstruct back to PNG.
 
