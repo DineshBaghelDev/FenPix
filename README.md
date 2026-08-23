@@ -41,6 +41,15 @@ The M3 tokenizer learns local structure-region IDs from indexed sprites. It
 uses transparency and per-image region identity, but ignores RGBA palette values
 so structure stays separate from semantic color.
 
+## Train Basic MaskGIT
+
+```bash
+python scripts/train_maskgit.py train data\processed --tokenizer runs\m3_structure_tokenizer.pt --epochs 20 --limit 32
+python scripts/train_maskgit.py sample --checkpoint runs\m4_maskgit.pt --out runs\m4_samples.png
+```
+
+M4 is unconditional and uses only 32x32-class M3 structure-token grids.
+
 ## Dataset Shape
 
 Put PNG files under a dataset folder. Optional metadata can sit next to each
@@ -106,7 +115,7 @@ See [MILESTONES.md](MILESTONES.md) for the full milestone map.
 1. Dataset pipeline
 2. Palette extraction + indexing
 3. Structure tokenizer/VQ, separate from color assignment
-4. Palette-conditioned MaskGIT
+4. Unconditional structure-token MaskGIT
 5. Text conditioning
 6. Variable aspect ratios
 7. Hierarchical 32 -> 64 -> 128 generation

@@ -124,26 +124,26 @@ M3 smoke result:
 
 ## M4: Basic MaskGIT
 
-Status: planned
+Status: complete
 
-Goal: generate palette-conditioned indices from masked tokens without text
-conditioning.
+Goal: generate structure-token maps from masked tokens without text
+conditioning, before adding palette or text paths.
 
 Deliverables:
 
-- Tiny transformer over structure tokens, palette embeddings, and indexed
-  targets.
+- Tiny transformer over M3 discrete structure tokens.
 - Masked-token training.
 - Iterative decode sampler.
 - 32x32 generation first.
 
 Target size:
 
-- 25-40M trainable parameters.
+- Start small; do not chase the 25-40M target yet.
 
 Done when:
 
-- Unconditional samples look like plausible pixel-art objects or tiles.
+- A tiny dataset can be overfit and fully masked inputs produce plausible
+  unconditional structure maps.
 
 ## M5: Text Conditioning
 
