@@ -18,6 +18,7 @@ from fenpix.hierarchy import HierarchicalMaskGIT, condition_to_shape, stage_toke
 from fenpix.refiner import FlowRefinerConfig, PaletteLogitFlowRefiner, compare_refinement
 from fenpix.text import FrozenPretrainedTextEncoder, TextEmbeddingCache, TextEncoderConfig
 from fenpix.tokenizer import StructureTokenizer
+from fenpix.training import append_jsonl, load_training_checkpoint, save_training_checkpoint, set_deterministic
 
 
 def _captions(batch) -> list[str]:
@@ -73,6 +74,7 @@ def _save_compare_viz(batch, palette, palette_mask, metrics, path: Path, max_ite
 
 
 def train(args: argparse.Namespace) -> dict[str, float]:
+    set_deterministic(args.seed)
     device = torch.device(args.device)
     tokenizer = StructureTokenizer.load_checkpoint(args.tokenizer, map_location=device).to(device).eval()
     color = IndexedColorModel.load_checkpoint(args.color_checkpoint, map_location=device).to(device).eval()
@@ -90,37 +92,47 @@ def train(args: argparse.Namespace) -> dict[str, float]:
         )
     ).to(device)
     opt = torch.optim.AdamW(refiner.parameters(), lr=args.lr)
+    scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
+    start_epoch = load_training_checkpoint(args.resume, refiner, opt, device) + 1 if args.resume else 1
     last: dict[str, float] = {}
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         total = 0.0
         batches = 0
         refiner.train()
+        opt.zero_grad(set_to_none=True)
         for batch in loader:
             text = (text_cache.encode(_captions(batch)) if text_cache else text_encoder.encode(_captions(batch))).to(device)
             structure = _structure_for_batch(batch, tokenizer, min(args.stage, args.max_size), device)
             base = _base_logits(color, batch, structure, text, device, args.guidance_scale)
-            loss = refiner.loss(
-                base,
-                batch["indices"].to(device),
-                batch["valid_mask"].to(device),
-                structure,
-                text,
-                batch["palette"].to(device),
-                batch["palette_mask"].to(device),
-            )
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
+            with torch.amp.autocast("cuda", enabled=args.amp and device.type == "cuda"):
+                loss = refiner.loss(
+                    base,
+                    batch["indices"].to(device),
+                    batch["valid_mask"].to(device),
+                    structure,
+                    text,
+                    batch["palette"].to(device),
+                    batch["palette_mask"].to(device),
+                )
+            scaler.scale(loss / args.grad_accum).backward()
+            if (batches + 1) % args.grad_accum == 0:
+                scaler.step(opt)
+                scaler.update()
+                opt.zero_grad(set_to_none=True)
             total += float(loss.item())
             batches += 1
+        if batches % args.grad_accum:
+            scaler.step(opt)
+            scaler.update()
+            opt.zero_grad(set_to_none=True)
         last = {"epoch": float(epoch), "loss": total / max(batches, 1)}
+        append_jsonl(args.log, last)
         print(json.dumps(last, sort_keys=True))
 
     eval_metrics = evaluate(args, refiner=refiner, color=color, tokenizer=tokenizer, loader=loader, text_encoder=text_encoder)
     if args.checkpoint:
-        args.checkpoint.parent.mkdir(parents=True, exist_ok=True)
-        refiner.save_checkpoint(args.checkpoint, extra={"train": last, "eval": eval_metrics})
+        save_training_checkpoint(args.checkpoint, refiner, opt, args.epochs, {"train": last, "eval": eval_metrics})
     return last
 
 
@@ -229,6 +241,10 @@ def main() -> None:
     train_parser.add_argument("--refine-steps", type=int, nargs="+", default=[0, 1, 2, 4])
     train_parser.add_argument("--cache", action="store_true")
     train_parser.add_argument("--seed", type=int, default=0)
+    train_parser.add_argument("--resume", type=Path)
+    train_parser.add_argument("--log", type=Path, default=Path("runs/m7_refiner_train.jsonl"))
+    train_parser.add_argument("--amp", action="store_true")
+    train_parser.add_argument("--grad-accum", type=int, default=1)
     shared(train_parser)
     train_parser.set_defaults(func=train)
 

@@ -14,6 +14,7 @@ from .palette import image_to_indices
 
 
 BUCKET_SIZES = (32, 64, 128)
+MANIFEST_NAMES = ("manifest.parquet", "manifest.jsonl")
 
 
 def _bucket_size(width: int, height: int, bucket_sizes: tuple[int, ...] = BUCKET_SIZES) -> int:
@@ -45,13 +46,16 @@ class PixelArtDataset(Dataset):
         *,
         cache_dir: str | Path | None = None,
         cache: bool = False,
+        manifest: str | Path | None = None,
         bucket_sizes: tuple[int, ...] = BUCKET_SIZES,
     ):
         self.root = Path(root)
         self.max_colors = max_colors
         self.bucket_sizes = tuple(sorted(bucket_sizes))
         self.cache_dir = Path(cache_dir) if cache_dir is not None else (self.root / ".fenpix_cache" if cache else None)
-        self.paths = sorted(self.root.rglob("*.png"))
+        manifest_path = Path(manifest) if manifest is not None else next((self.root / name for name in MANIFEST_NAMES if (self.root / name).exists()), None)
+        self.rows = load_dataset_manifest(manifest_path, root=self.root) if manifest_path else []
+        self.paths = [Path(row["path"]) for row in self.rows] if self.rows else sorted(self.root.rglob("*.png"))
         if not self.paths:
             raise ValueError(f"no PNG files found under {self.root}")
         if self.cache_dir is not None:
@@ -97,10 +101,13 @@ class PixelArtDataset(Dataset):
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         path = self.paths[index]
+        manifest_row = self.rows[index] if self.rows else {}
         encoding = self._encoding(path)
 
         meta_path = path.with_suffix(".json")
-        metadata = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+        metadata = dict(manifest_row.get("metadata") or {})
+        if not metadata and meta_path.exists():
+            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
         indices = encoding["indices"] if isinstance(encoding, dict) else encoding.indices
         palette = encoding["palette"] if isinstance(encoding, dict) else encoding.palette
         width = encoding["width"] if isinstance(encoding, dict) else encoding.width
@@ -109,8 +116,8 @@ class PixelArtDataset(Dataset):
         unique_color_count = (
             encoding["unique_color_count"] if isinstance(encoding, dict) else encoding.unique_color_count
         )
-        bucket_size = _bucket_size(width, height, self.bucket_sizes)
-        aspect_bucket = _aspect_bucket(width, height)
+        bucket_size = int(manifest_row.get("bucket_size") or _bucket_size(width, height, self.bucket_sizes))
+        aspect_bucket = str(manifest_row.get("aspect_bucket") or _aspect_bucket(width, height))
 
         return {
             "path": str(path),
@@ -160,6 +167,141 @@ def train_val_test_split(
         Subset(dataset, order[test_count : test_count + validation_count]),
         Subset(dataset, order[:test_count]),
     )
+
+
+def _perceptual_hash(image: Image.Image, size: int = 8) -> str:
+    gray = image.convert("L").resize((size, size), Image.Resampling.BILINEAR)
+    arr = np.asarray(gray, dtype=np.float32)
+    return "".join("1" if value >= arr.mean() else "0" for value in arr.flatten())
+
+
+def _hamming(a: str, b: str) -> int:
+    return sum(x != y for x, y in zip(a, b))
+
+
+def build_dataset_manifest(
+    root: str | Path,
+    manifest_path: str | Path,
+    *,
+    max_colors: int = 64,
+    bucket_sizes: tuple[int, ...] = BUCKET_SIZES,
+    near_duplicate_hamming: int = 4,
+) -> dict[str, Any]:
+    root = Path(root)
+    manifest_path = Path(manifest_path)
+    rows: list[dict[str, Any]] = []
+    rejected: dict[str, int] = {}
+    seen_bytes: dict[str, str] = {}
+    seen_phash: dict[str, str] = {}
+
+    for path in sorted(root.rglob("*.png")):
+        if any(part.startswith(".") for part in path.relative_to(root).parts):
+            continue
+        try:
+            with Image.open(path) as image:
+                image.load()
+                encoding = image_to_indices(image, max_colors=max_colors)
+                width, height = encoding.width, encoding.height
+                phash = _perceptual_hash(image)
+        except Exception as exc:
+            rejected[type(exc).__name__] = rejected.get(type(exc).__name__, 0) + 1
+            continue
+
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        metadata_path = path.with_suffix(".json")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+        near_of = next((other for other_hash, other in seen_phash.items() if _hamming(phash, other_hash) <= near_duplicate_hamming), None)
+        row = {
+            "path": str(path),
+            "rel_path": str(path.relative_to(root)).replace("\\", "/"),
+            "width": width,
+            "height": height,
+            "bucket_size": _bucket_size(width, height, bucket_sizes),
+            "aspect_bucket": _aspect_bucket(width, height),
+            "bucket": bucket_id(width, height, bucket_sizes),
+            "sha256": digest,
+            "phash": phash,
+            "duplicate_of": seen_bytes.get(digest),
+            "near_duplicate_of": near_of,
+            "lossy": encoding.lossy,
+            "unique_color_count": encoding.unique_color_count,
+            "palette_size": len(encoding.palette),
+            "source": metadata.get("source"),
+            "source_url": metadata.get("source_url"),
+            "license": metadata.get("license"),
+            "metadata": metadata,
+        }
+        rows.append(row)
+        seen_bytes.setdefault(digest, str(path))
+        seen_phash.setdefault(phash, str(path))
+
+    save_dataset_manifest(rows, manifest_path)
+    return dataset_manifest_report(rows) | {"rejected": rejected, "manifest": str(manifest_path)}
+
+
+def save_dataset_manifest(rows: list[dict[str, Any]], path: str | Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.suffix == ".parquet":
+        try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+        except ImportError as exc:
+            raise RuntimeError("Parquet manifests require pyarrow; use .jsonl or install pyarrow") from exc
+        parquet_rows = [{k: (json.dumps(v, sort_keys=True) if isinstance(v, (dict, list)) else v) for k, v in row.items()} for row in rows]
+        pq.write_table(pa.Table.from_pylist(parquet_rows), path)
+        return
+    path.write_text("\n".join(json.dumps(row, sort_keys=True) for row in rows) + ("\n" if rows else ""), encoding="utf-8")
+
+
+def load_dataset_manifest(path: str | Path, *, root: str | Path | None = None) -> list[dict[str, Any]]:
+    path = Path(path)
+    root = Path(root) if root is not None else path.parent
+    if path.suffix == ".parquet":
+        try:
+            import pyarrow.parquet as pq
+        except ImportError as exc:
+            raise RuntimeError("Parquet manifests require pyarrow; use .jsonl or install pyarrow") from exc
+        raw_rows = pq.read_table(path).to_pylist()
+    else:
+        raw_rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = []
+    for row in raw_rows:
+        row = dict(row)
+        if isinstance(row.get("metadata"), str):
+            row["metadata"] = json.loads(row["metadata"])
+        row["path"] = str(root / row["rel_path"]) if row.get("rel_path") else str(Path(row["path"]))
+        rows.append(row)
+    return rows
+
+
+def dataset_manifest_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    buckets: dict[str, int] = {}
+    licenses: dict[str, int] = {}
+    styles: dict[str, int] = {}
+    lossy = 0
+    duplicates = 0
+    near_duplicates = 0
+    for row in rows:
+        buckets[row["bucket"]] = buckets.get(row["bucket"], 0) + 1
+        if row.get("license"):
+            licenses[str(row["license"])] = licenses.get(str(row["license"]), 0) + 1
+        meta = row.get("metadata") or {}
+        for tag in meta.get("tags", []) or []:
+            styles[str(tag)] = styles.get(str(tag), 0) + 1
+        lossy += int(bool(row.get("lossy")))
+        duplicates += int(bool(row.get("duplicate_of")))
+        near_duplicates += int(bool(row.get("near_duplicate_of")))
+    return {
+        "count": len(rows),
+        "lossy": lossy,
+        "lossless": len(rows) - lossy,
+        "duplicates": duplicates,
+        "near_duplicates": near_duplicates,
+        "buckets": dict(sorted(buckets.items())),
+        "licenses": dict(sorted(licenses.items())),
+        "tags": dict(sorted(styles.items())),
+    }
 
 
 def filtered_indices(
@@ -282,7 +424,9 @@ def quality_score(sample: dict[str, Any]) -> float:
 
 def dataset_quality_report(dataset: Dataset) -> dict[str, Any]:
     seen: dict[str, str] = {}
+    seen_phash: dict[str, str] = {}
     duplicates: list[dict[str, str]] = []
+    near_duplicates: list[dict[str, str]] = []
     scores: list[float] = []
     for index in range(len(dataset)):
         sample = dataset[index]
@@ -292,11 +436,19 @@ def dataset_quality_report(dataset: Dataset) -> dict[str, Any]:
             duplicates.append({"path": str(path), "duplicate_of": seen[digest]})
         else:
             seen[digest] = str(path)
+        with Image.open(path) as image:
+            phash = _perceptual_hash(image)
+        near_of = next((other for other_hash, other in seen_phash.items() if _hamming(phash, other_hash) <= 4), None)
+        if near_of and near_of != str(path):
+            near_duplicates.append({"path": str(path), "near_duplicate_of": near_of})
+        seen_phash.setdefault(phash, str(path))
         scores.append(quality_score(sample))
     return {
         "count": len(dataset),
         "duplicate_count": len(duplicates),
+        "near_duplicate_count": len(near_duplicates),
         "duplicates": duplicates,
+        "near_duplicates": near_duplicates,
         "mean_quality": float(sum(scores) / max(1, len(scores))),
         "min_quality": float(min(scores) if scores else 0.0),
         "max_quality": float(max(scores) if scores else 0.0),

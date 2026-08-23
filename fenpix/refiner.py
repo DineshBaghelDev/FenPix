@@ -31,6 +31,10 @@ def _pad_palette_mask(palette_mask: torch.Tensor, max_colors: int) -> torch.Tens
     return out
 
 
+def _masked_logit_floor(logits: torch.Tensor) -> float:
+    return max(torch.finfo(logits.dtype).min, -1e4) if logits.is_floating_point() else -1e4
+
+
 class PaletteLogitFlowRefiner(nn.Module):
     def __init__(self, config: FlowRefinerConfig | None = None):
         super().__init__()
@@ -136,7 +140,7 @@ class PaletteLogitFlowRefiner(nn.Module):
             t = torch.full((logits.shape[0],), step / steps, device=logits.device)
             x = x + self(x, t, valid_mask, structure_tokens, text_embeddings, palette, palette_mask) / steps
             x = x.masked_fill(~_palette_mask_from_palette(palette_mask.to(x.device), x.shape[-2], x.shape[-1]), -20)
-        x = x.masked_fill(~_palette_mask_from_palette(palette_mask.to(x.device), x.shape[-2], x.shape[-1]), -1e9)
+        x = x.masked_fill(~_palette_mask_from_palette(palette_mask.to(x.device), x.shape[-2], x.shape[-1]), _masked_logit_floor(x))
         return x.masked_fill(~valid_mask[:, None], 0)
 
     def save_checkpoint(self, path: str | Path, extra: dict[str, Any] | None = None) -> None:

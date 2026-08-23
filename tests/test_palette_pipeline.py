@@ -10,8 +10,11 @@ from torch.utils.data import DataLoader
 from fenpix import (
     BucketBatchSampler,
     PixelArtDataset,
+    build_dataset_manifest,
+    canonicalize_palette_indices,
     filtered_indices,
     image_to_indices,
+    load_dataset_manifest,
     pixel_art_collate,
     reconstruct_rgba,
     train_val_test_split,
@@ -83,6 +86,26 @@ class PalettePipelineTest(unittest.TestCase):
         self.assertEqual(encoding.unique_color_count, 9)
         self.assertLessEqual(len(encoding.palette), 8)
         self.assertFalse(np.array_equal(rebuilt, pixels))
+
+    def test_palette_order_remap_preserves_rgba(self):
+        indices = np.array([[0, 1], [2, 1]], dtype=np.int64)
+        palette = np.array([[255, 0, 0, 255], [0, 0, 0, 0], [0, 0, 255, 255]], dtype=np.uint8)
+
+        new_indices, new_palette = canonicalize_palette_indices(indices, palette)
+
+        np.testing.assert_array_equal(np.asarray(reconstruct_rgba(new_indices, new_palette)), palette[indices])
+        self.assertEqual(new_palette[0].tolist(), [0, 0, 0, 0])
+
+    def test_transparent_and_opaque_same_rgb_remain_distinct_indices(self):
+        pixels = np.array([[[255, 0, 0, 0], [255, 0, 0, 255]]], dtype=np.uint8)
+
+        encoding = image_to_indices(Image.fromarray(pixels, "RGBA"), max_colors=8)
+        rebuilt = np.asarray(reconstruct_rgba(encoding.indices, encoding.palette))
+
+        self.assertEqual(len(encoding.palette), 2)
+        self.assertNotEqual(int(encoding.indices[0, 0]), int(encoding.indices[0, 1]))
+        self.assertEqual(rebuilt[0, 0].tolist(), [0, 0, 0, 0])
+        self.assertEqual(rebuilt[0, 1].tolist(), [255, 0, 0, 255])
 
     def test_dataset_keeps_variable_sizes_and_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -202,6 +225,22 @@ class PalettePipelineTest(unittest.TestCase):
             self.assertTrue(torch.equal(uncached["palette"], cached["palette"]))
             self.assertEqual(uncached["dimensions"], cached["dimensions"])
             self.assertEqual(uncached["metadata"], cached["metadata"])
+
+    def test_manifest_avoids_sidecar_reads_after_indexing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_rgba(root / "sprite.png", 17, 9)
+            (root / "sprite.json").write_text('{"caption":"indexed"}', encoding="utf-8")
+            report = build_dataset_manifest(root, root / "manifest.jsonl")
+            (root / "sprite.json").unlink()
+
+            rows = load_dataset_manifest(root / "manifest.jsonl", root=root)
+            sample = PixelArtDataset(root)[0]
+
+        self.assertEqual(report["count"], 1)
+        self.assertEqual(rows[0]["metadata"]["caption"], "indexed")
+        self.assertEqual(sample["metadata"]["caption"], "indexed")
+        self.assertEqual(sample["bucket"], "32:landscape")
 
     def test_malformed_png_fails_clearly(self):
         with tempfile.TemporaryDirectory() as tmp:

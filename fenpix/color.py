@@ -76,6 +76,10 @@ def _pad_palette_batch(palette: torch.Tensor, palette_mask: torch.Tensor, max_co
     return out, mask
 
 
+def _masked_logit_floor(logits: torch.Tensor) -> float:
+    return max(torch.finfo(logits.dtype).min, -1e4) if logits.is_floating_point() else -1e4
+
+
 class IndexedColorModel(nn.Module):
     def __init__(self, config: IndexedColorConfig | None = None):
         super().__init__()
@@ -151,7 +155,7 @@ class IndexedColorModel(nn.Module):
         palette, palette_mask = _pad_palette_batch(palette, palette_mask, self.config.max_colors)
         masked, labels = random_mask_tokens(indices.clamp_min(0), valid_mask, self.index_model.config.mask_token_id)
         logits = self.index_model(masked, valid_mask, self._index_text(text_embeddings, palette, palette_mask), structure_tokens, cond_drop_prob)
-        logits = logits.masked_fill(~palette_mask[:, :, None, None].to(logits.device), -1e9)
+        logits = logits.masked_fill(~palette_mask[:, :, None, None].to(logits.device), _masked_logit_floor(logits))
         return F.cross_entropy(logits.permute(0, 2, 3, 1).reshape(-1, self.config.max_colors), labels.reshape(-1), ignore_index=-100)
 
     def index_logits(
@@ -170,7 +174,7 @@ class IndexedColorModel(nn.Module):
         if text is not None and guidance_scale != 1.0:
             uncond = self.index_model(tokens.clamp_min(0), valid_mask, None, structure_tokens)
             logits = uncond + (logits - uncond) * guidance_scale
-        return logits.masked_fill(~palette_mask[:, :, None, None].to(logits.device), -1e9)
+        return logits.masked_fill(~palette_mask[:, :, None, None].to(logits.device), _masked_logit_floor(logits))
 
     def loss(
         self,
@@ -231,7 +235,7 @@ class IndexedColorModel(nn.Module):
             if text_embeddings is not None and guidance_scale != 1.0:
                 uncond = self.index_model(tokens, valid_mask, None, structure_tokens)
                 logits = uncond + (logits - uncond) * guidance_scale
-            logits = logits.masked_fill(~palette_mask[:, :, None, None].to(logits.device), -1e9)
+            logits = logits.masked_fill(~palette_mask[:, :, None, None].to(logits.device), _masked_logit_floor(logits))
             probs = (logits.clamp(-50, 50) / max(temperature, 1e-6)).softmax(dim=1)
             sampled = torch.multinomial(probs.permute(0, 2, 3, 1).reshape(-1, self.config.max_colors), 1).reshape(shape)
             confidence = probs.gather(1, sampled[:, None]).squeeze(1).masked_fill(~still_masked, -1)
@@ -301,7 +305,7 @@ class ConvIndexDenoiser(nn.Module):
         for block in self.blocks:
             x = block(x)
         x = self.head(F.gelu(self.norm(x)))
-        return x.masked_fill(~valid_mask[:, None], -1e9)
+        return x.masked_fill(~valid_mask[:, None], _masked_logit_floor(x))
 
 
 class ConvResidualBlock(nn.Module):

@@ -1,16 +1,20 @@
 from .dataset import (
     BucketBatchSampler,
     PixelArtDataset,
+    build_dataset_manifest,
     bucket_id,
     dataset_quality_report,
+    dataset_manifest_report,
     filtered_indices,
+    load_dataset_manifest,
     pixel_art_collate,
     quality_score,
+    save_dataset_manifest,
     split_report,
     train_val_test_split,
     train_validation_split,
 )
-from .palette import PaletteEncoding, StructureEncoding, extract_palette, image_to_indices, reconstruct_rgba
+from .palette import PaletteEncoding, StructureEncoding, canonicalize_palette_indices, extract_palette, image_to_indices, reconstruct_rgba
 from .tokenizer import (
     StructureTokenizer,
     StructureTokenizerConfig,
@@ -27,6 +31,7 @@ from .text import FrozenHashTextEncoder, FrozenPretrainedTextEncoder, FrozenTiny
 
 __all__ = [
     "BucketBatchSampler",
+    "build_dataset_manifest",
     "PaletteEncoding",
     "PixelArtDataset",
     "FrozenHashTextEncoder",
@@ -47,19 +52,23 @@ __all__ = [
     "PROMPT_EVAL_SET",
     "QualityMetrics",
     "bucket_id",
+    "canonicalize_palette_indices",
     "canonical_structure_indices",
     "condition_to_shape",
     "compute_quality_metrics",
     "dataset_quality_report",
+    "dataset_manifest_report",
     "extract_palette",
     "filtered_indices",
     "image_to_indices",
+    "load_dataset_manifest",
     "maskgit_loss",
     "palette_mask_from_sizes",
     "palette_to_uint8",
     "masked_cross_entropy",
     "pixel_art_collate",
     "quality_score",
+    "save_dataset_manifest",
     "split_report",
     "reconstruct_rgba",
     "reconstruct_indexed_png",

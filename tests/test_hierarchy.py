@@ -15,6 +15,7 @@ from fenpix.hierarchy import (
     stage_native_shape,
     stage_tokens_from_batch,
 )
+from scripts.train_hierarchy import _noisy_condition
 from fenpix.maskgit import maskgit_loss
 from fenpix.tokenizer import StructureTokenizer, StructureTokenizerConfig
 
@@ -83,6 +84,18 @@ class HierarchyTest(unittest.TestCase):
 
         self.assertIsNotNone(model.models["64"].structure_cond_embed.weight.grad)
         self.assertIsNotNone(model.models["64"].head.weight.grad)
+
+    def test_noisy_lower_stage_condition_keeps_shape_and_valid_mask(self):
+        torch.manual_seed(0)
+        tokens = torch.zeros((1, 4, 4), dtype=torch.long)
+        valid = torch.ones_like(tokens, dtype=torch.bool)
+        noisy, noisy_valid = _noisy_condition(tokens, valid, vocab_size=8, noise_prob=1.0)
+
+        self.assertEqual(noisy.shape, tokens.shape)
+        self.assertTrue(torch.equal(noisy_valid, valid))
+        self.assertTrue(noisy.ge(0).all())
+        self.assertTrue(noisy.lt(8).all())
+        self.assertFalse(torch.equal(noisy, tokens))
 
     def test_checkpoint_roundtrip(self):
         model = HierarchicalMaskGIT(HierarchicalMaskGITConfig(vocab_size=8, hidden_dim=16, depth=1, heads=4, text_dim=8, stages=(32, 64)))

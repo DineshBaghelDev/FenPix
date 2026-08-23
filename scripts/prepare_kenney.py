@@ -16,6 +16,7 @@ from PIL import Image, UnidentifiedImageError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fenpix.palette import image_to_indices
+from fenpix.dataset import build_dataset_manifest
 
 
 DEFAULT_SOURCE_URL = "https://kenney.nl/assets/tiny-town"
@@ -152,6 +153,7 @@ def prepare_kenney(
     report["size_distribution"] = dict(sorted(report["size_distribution"].items()))
     report["palette_size_distribution"] = dict(sorted(report["palette_size_distribution"].items(), key=lambda item: int(item[0])))
     (output_path / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    report["manifest"] = build_dataset_manifest(output_path, output_path / "manifest.jsonl", max_colors=max_colors)
     return report
 
 

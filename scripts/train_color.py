@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import torch
@@ -18,6 +19,7 @@ from fenpix.dataset import BucketBatchSampler, PixelArtDataset, filtered_indices
 from fenpix.hierarchy import HierarchicalMaskGIT, condition_to_shape, stage_tokens_from_batch
 from fenpix.text import FrozenPretrainedTextEncoder, TextEmbeddingCache, TextEncoderConfig
 from fenpix.tokenizer import StructureTokenizer
+from fenpix.training import append_jsonl, load_training_checkpoint, save_training_checkpoint, set_deterministic
 
 
 def _captions(batch) -> list[str]:
@@ -81,6 +83,7 @@ def _save_viz(structure: torch.Tensor, valid: torch.Tensor, sample: dict[str, to
 
 
 def train(args: argparse.Namespace) -> dict[str, float]:
+    set_deterministic(args.seed)
     device = torch.device(args.device)
     tokenizer = StructureTokenizer.load_checkpoint(args.tokenizer, map_location=device).to(device).eval()
     text_encoder = FrozenPretrainedTextEncoder(TextEncoderConfig(dim=args.text_dim, provider=args.text_provider, device=args.device))
@@ -102,39 +105,62 @@ def train(args: argparse.Namespace) -> dict[str, float]:
     )
     model = IndexedColorModel(config).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
+    start_epoch = load_training_checkpoint(args.resume, model, opt, device) + 1 if args.resume else 1
     last = {}
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+        started = perf_counter()
+        images = 0
         totals = {"loss": 0.0, "palette_loss": 0.0, "index_loss": 0.0}
         steps = 0
         model.train()
+        opt.zero_grad(set_to_none=True)
         for batch in loader:
             texts = _captions(batch)
             text = (text_cache.encode(texts) if text_cache else text_encoder.encode(texts)).to(device)
             structure = _structure_for_batch(batch, tokenizer, min(args.stage, args.max_size), device)
-            losses = model.loss(
-                batch["indices"].to(device),
-                batch["valid_mask"].to(device),
-                structure,
-                text,
-                batch["palette"].to(device),
-                batch["palette_mask"].to(device),
-                batch["palette_size"].to(device),
-                args.cond_dropout,
-            )
-            opt.zero_grad(set_to_none=True)
-            losses["loss"].backward()
-            opt.step()
+            with torch.amp.autocast("cuda", enabled=args.amp and device.type == "cuda"):
+                losses = model.loss(
+                    batch["indices"].to(device),
+                    batch["valid_mask"].to(device),
+                    structure,
+                    text,
+                    batch["palette"].to(device),
+                    batch["palette_mask"].to(device),
+                    batch["palette_size"].to(device),
+                    args.cond_dropout,
+                )
+            scaler.scale(losses["loss"] / args.grad_accum).backward()
+            if (steps + 1) % args.grad_accum == 0:
+                scaler.step(opt)
+                scaler.update()
+                opt.zero_grad(set_to_none=True)
             for key in totals:
                 totals[key] += float(losses[key].item())
             steps += 1
+            images += int(batch["indices"].shape[0])
+        if steps % args.grad_accum:
+            scaler.step(opt)
+            scaler.update()
+            opt.zero_grad(set_to_none=True)
+        seconds = perf_counter() - started
         val = _validation_loss(model, validation_loader, tokenizer, text_encoder, args, device)
-        last = {"epoch": epoch, "split": split_report(train_set, validation_set, test_set), "validation_loss": val} | {key: value / max(steps, 1) for key, value in totals.items()}
+        last = {
+            "epoch": epoch,
+            "split": split_report(train_set, validation_set, test_set),
+            "seconds": seconds,
+            "images_per_second": images / max(seconds, 1e-9),
+            "peak_vram_mb": torch.cuda.max_memory_reserved(device) / 1024 / 1024 if device.type == "cuda" else 0.0,
+            "validation_loss": val,
+        } | {key: value / max(steps, 1) for key, value in totals.items()}
+        append_jsonl(args.log, last)
         print(json.dumps(last, sort_keys=True))
 
     if args.checkpoint:
-        Path(args.checkpoint).parent.mkdir(parents=True, exist_ok=True)
-        model.save_checkpoint(args.checkpoint, extra=last)
+        save_training_checkpoint(args.checkpoint, model, opt, args.epochs, last)
     if args.viz:
         batch = next(iter(loader))
         text = text_encoder.encode(_captions(batch)).to(device)
@@ -225,6 +251,10 @@ def main() -> None:
     train_parser.add_argument("--guidance-scale", type=float, default=2.0)
     train_parser.add_argument("--cache", action="store_true")
     train_parser.add_argument("--seed", type=int, default=0)
+    train_parser.add_argument("--resume", type=Path)
+    train_parser.add_argument("--log", type=Path, default=Path("runs/m7_color_train.jsonl"))
+    train_parser.add_argument("--amp", action="store_true")
+    train_parser.add_argument("--grad-accum", type=int, default=1)
     train_parser.set_defaults(func=train)
 
     sample_parser = sub.add_parser("sample")

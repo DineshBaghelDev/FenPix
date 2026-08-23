@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from time import perf_counter
 
 import torch
 import torch.nn.functional as F
@@ -16,6 +17,7 @@ from fenpix.dataset import BucketBatchSampler, PixelArtDataset, pixel_art_collat
 from fenpix.hierarchy import HierarchicalMaskGIT, HierarchicalMaskGITConfig, stage_tokens_from_batch
 from fenpix.text import FrozenPretrainedTextEncoder, TextEmbeddingCache, TextEncoderConfig
 from fenpix.tokenizer import StructureTokenizer
+from fenpix.training import append_jsonl, load_training_checkpoint, save_training_checkpoint, set_deterministic
 
 
 def _captions(batch) -> list[str]:
@@ -54,7 +56,16 @@ def _save_stage_grid(samples: dict[int, tuple[torch.Tensor, torch.Tensor]], path
     Image.fromarray(canvas.numpy(), "L").save(path)
 
 
+def _noisy_condition(tokens: torch.Tensor, valid: torch.Tensor, vocab_size: int, noise_prob: float) -> tuple[torch.Tensor, torch.Tensor]:
+    if noise_prob <= 0:
+        return tokens, valid
+    replace = torch.rand(tokens.shape, device=tokens.device).lt(noise_prob) & valid
+    noise = torch.randint(0, vocab_size, tokens.shape, device=tokens.device)
+    return tokens.masked_scatter(replace, noise[replace]), valid
+
+
 def train(args: argparse.Namespace) -> dict[str, float]:
+    set_deterministic(args.seed)
     device = torch.device(args.device)
     tokenizer = StructureTokenizer.load_checkpoint(args.tokenizer, map_location=device).to(device).eval()
     text_encoder = FrozenPretrainedTextEncoder(TextEncoderConfig(dim=args.text_dim, provider=args.text_provider, device=args.device))
@@ -83,12 +94,19 @@ def train(args: argparse.Namespace) -> dict[str, float]:
     )
     model = HierarchicalMaskGIT(config).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
+    start_epoch = load_training_checkpoint(args.resume, model, opt, device) + 1 if args.resume else 1
     last = {}
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+        started = perf_counter()
+        images = 0
         totals = {stage: 0.0 for stage in config.stages}
         steps = 0
         model.train()
+        opt.zero_grad(set_to_none=True)
         for batch in loader:
             texts = _captions(batch)
             text_embeddings = (text_cache.encode(texts) if text_cache else text_encoder.encode(texts)).to(device)
@@ -96,27 +114,44 @@ def train(args: argparse.Namespace) -> dict[str, float]:
             loss = torch.zeros((), device=device)
             previous = None
             for stage in config.stages:
-                stage_loss = model.stage_loss(
-                    stage,
-                    tokens[stage][0],
-                    tokens[stage][1],
-                    text_embeddings,
-                    *(previous or (None, None)),
-                    cond_drop_prob=args.cond_dropout,
-                )
+                cond = _noisy_condition(*previous, config.vocab_size, args.lower_noise_prob) if previous else (None, None)
+                with torch.amp.autocast("cuda", enabled=args.amp and device.type == "cuda"):
+                    stage_loss = model.stage_loss(
+                        stage,
+                        tokens[stage][0],
+                        tokens[stage][1],
+                        text_embeddings,
+                        *cond,
+                        cond_drop_prob=args.cond_dropout,
+                    )
                 totals[stage] += float(stage_loss.item())
                 loss = loss + stage_loss
                 previous = tokens[stage]
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
+            scaler.scale(loss / args.grad_accum).backward()
+            if (steps + 1) % args.grad_accum == 0:
+                scaler.step(opt)
+                scaler.update()
+                opt.zero_grad(set_to_none=True)
             steps += 1
-        last = {"epoch": epoch, "validation_loss": _validation_loss(model, validation_loader, tokenizer, text_encoder, config, args, device), "split": split_report(train_set, validation_set, test_set)} | {f"loss_{stage}": totals[stage] / max(steps, 1) for stage in config.stages}
+            images += int(batch["indices"].shape[0])
+        if steps % args.grad_accum:
+            scaler.step(opt)
+            scaler.update()
+            opt.zero_grad(set_to_none=True)
+        seconds = perf_counter() - started
+        last = {
+            "epoch": epoch,
+            "validation_loss": _validation_loss(model, validation_loader, tokenizer, text_encoder, config, args, device),
+            "split": split_report(train_set, validation_set, test_set),
+            "seconds": seconds,
+            "images_per_second": images / max(seconds, 1e-9),
+            "peak_vram_mb": torch.cuda.max_memory_reserved(device) / 1024 / 1024 if device.type == "cuda" else 0.0,
+        } | {f"loss_{stage}": totals[stage] / max(steps, 1) for stage in config.stages}
+        append_jsonl(args.log, last)
         print(json.dumps(last, sort_keys=True))
 
     if args.checkpoint:
-        Path(args.checkpoint).parent.mkdir(parents=True, exist_ok=True)
-        model.save_checkpoint(args.checkpoint, extra=last)
+        save_training_checkpoint(args.checkpoint, model, opt, args.epochs, last)
     if args.viz:
         sample_args = argparse.Namespace(**(vars(args) | {"out": args.viz}))
         sample(sample_args)
@@ -184,6 +219,7 @@ def main() -> None:
     train_parser.add_argument("--text-provider", choices=["clip", "tiny"], default="clip")
     train_parser.add_argument("--cond-tokens", type=int, default=1)
     train_parser.add_argument("--cond-dropout", type=float, default=0.1)
+    train_parser.add_argument("--lower-noise-prob", type=float, default=0.15)
     train_parser.add_argument("--embedding-cache", type=Path, default=Path("runs/m6_text_cache.pt"))
     train_parser.add_argument("--lr", type=float, default=3e-4)
     train_parser.add_argument("--stages", type=int, nargs="+", default=[32, 64, 128])
@@ -196,6 +232,10 @@ def main() -> None:
     train_parser.add_argument("--prompts", nargs="*")
     train_parser.add_argument("--cache", action="store_true")
     train_parser.add_argument("--seed", type=int, default=0)
+    train_parser.add_argument("--resume", type=Path)
+    train_parser.add_argument("--log", type=Path, default=Path("runs/m6_train.jsonl"))
+    train_parser.add_argument("--amp", action="store_true")
+    train_parser.add_argument("--grad-accum", type=int, default=1)
     train_parser.set_defaults(func=train)
 
     sample_parser = sub.add_parser("sample")

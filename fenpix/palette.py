@@ -51,7 +51,9 @@ class PaletteEncoding:
 
 
 def _as_rgba_array(image: Image.Image) -> np.ndarray:
-    return np.asarray(image.convert("RGBA"), dtype=np.uint8)
+    rgba = np.asarray(image.convert("RGBA"), dtype=np.uint8).copy()
+    rgba[rgba[..., 3] == 0, :3] = 0
+    return rgba
 
 
 def _unique_rows(rows: np.ndarray) -> np.ndarray:
@@ -60,6 +62,15 @@ def _unique_rows(rows: np.ndarray) -> np.ndarray:
     unique = np.unique(rows, axis=0)
     order = np.lexsort((unique[:, 2], unique[:, 1], unique[:, 0], unique[:, 3]))
     return unique[order].astype(np.uint8)
+
+
+def canonicalize_palette_indices(indices: np.ndarray, palette: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    palette = np.asarray(palette, dtype=np.uint8)
+    indices = np.asarray(indices, dtype=np.int64)
+    order = np.lexsort((palette[:, 2], palette[:, 1], palette[:, 0], palette[:, 3]))
+    remap = np.empty(len(order), dtype=np.int64)
+    remap[order] = np.arange(len(order), dtype=np.int64)
+    return remap[indices], palette[order].astype(np.uint8)
 
 
 def _quantize_rgb(rows: np.ndarray, max_colors: int) -> np.ndarray:
@@ -125,10 +136,11 @@ def image_to_indices(image: Image.Image, max_colors: int = 64) -> PaletteEncodin
         if transparent_index is not None:
             indices[flat[:, 3] == 0] = transparent_index
 
+    indices, palette = canonicalize_palette_indices(indices.reshape(height, width), palette)
     metadata = dict(image.info)
     return PaletteEncoding(
         structure=StructureEncoding(
-            indices=indices.reshape(height, width),
+            indices=indices,
             width=width,
             height=height,
             metadata=metadata,

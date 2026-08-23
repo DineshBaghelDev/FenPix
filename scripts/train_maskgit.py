@@ -16,6 +16,7 @@ from fenpix.dataset import PixelArtDataset, pixel_art_collate, split_report, tra
 from fenpix.maskgit import MaskGIT, MaskGITConfig, maskgit_loss, random_mask_tokens
 from fenpix.text import FrozenPretrainedTextEncoder, TextEmbeddingCache, TextEncoderConfig
 from fenpix.tokenizer import StructureTokenizer, canonical_structure_indices, structure_one_hot
+from fenpix.training import append_jsonl, load_training_checkpoint, save_training_checkpoint, set_deterministic
 
 
 @torch.no_grad()
@@ -74,6 +75,7 @@ def _dataset(args: argparse.Namespace):
 
 
 def train(args: argparse.Namespace) -> dict[str, float]:
+    set_deterministic(args.seed)
     device = torch.device(args.device)
     tokenizer = StructureTokenizer.load_checkpoint(args.tokenizer, map_location=device).to(device).eval()
     text_encoder = FrozenPretrainedTextEncoder(TextEncoderConfig(dim=args.text_dim, provider=args.text_provider, device=args.device))
@@ -94,34 +96,44 @@ def train(args: argparse.Namespace) -> dict[str, float]:
     )
     model = MaskGIT(config).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
+    start_epoch = load_training_checkpoint(args.resume, model, opt, device) + 1 if args.resume else 1
     last = {}
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         total = 0.0
         steps = 0
         model.train()
+        opt.zero_grad(set_to_none=True)
         for batch in loader:
             tokens, valid = _tokens_from_batch(batch, tokenizer, device)
             texts = _captions(batch)
             text_embeddings = (text_cache.encode(texts) if text_cache else text_encoder.encode(texts)).to(device)
             masked, labels = random_mask_tokens(tokens, valid, config.mask_token_id)
-            loss = maskgit_loss(model(masked, valid, text_embeddings, cond_drop_prob=args.cond_dropout), labels)
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
+            with torch.amp.autocast("cuda", enabled=args.amp and device.type == "cuda"):
+                loss = maskgit_loss(model(masked, valid, text_embeddings, cond_drop_prob=args.cond_dropout), labels)
+            scaler.scale(loss / args.grad_accum).backward()
+            if (steps + 1) % args.grad_accum == 0:
+                scaler.step(opt)
+                scaler.update()
+                opt.zero_grad(set_to_none=True)
             total += float(loss.item())
             steps += 1
+        if steps % args.grad_accum:
+            scaler.step(opt)
+            scaler.update()
+            opt.zero_grad(set_to_none=True)
         last = {
             "epoch": epoch,
             "loss": total / max(steps, 1),
             "validation_loss": _validation_loss(model, validation_loader, tokenizer, text_encoder, args, device),
             "split": split_report(train_set, validation_set, test_set),
         }
+        append_jsonl(args.log, last)
         print(json.dumps(last, sort_keys=True))
 
     if args.checkpoint:
-        Path(args.checkpoint).parent.mkdir(parents=True, exist_ok=True)
-        model.save_checkpoint(args.checkpoint, extra=last)
+        save_training_checkpoint(args.checkpoint, model, opt, args.epochs, last)
     if args.viz:
         model.eval()
         with torch.no_grad():
@@ -200,6 +212,10 @@ def main() -> None:
     train_parser.add_argument("--prompts", nargs="*")
     train_parser.add_argument("--cache", action="store_true")
     train_parser.add_argument("--seed", type=int, default=0)
+    train_parser.add_argument("--resume", type=Path)
+    train_parser.add_argument("--log", type=Path, default=Path("runs/m5_train.jsonl"))
+    train_parser.add_argument("--amp", action="store_true")
+    train_parser.add_argument("--grad-accum", type=int, default=1)
     train_parser.set_defaults(func=train)
 
     sample_parser = sub.add_parser("sample")

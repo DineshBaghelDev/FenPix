@@ -118,6 +118,7 @@ class StructureTokenizerTest(unittest.TestCase):
 
         self.assertGreater(metrics["accuracy"], 0.9)
         self.assertGreater(metrics["silhouette_accuracy"], 0.95)
+        self.assertIn("dead_codes", metrics)
 
 
 if __name__ == "__main__":

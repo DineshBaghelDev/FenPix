@@ -58,6 +58,7 @@ def main() -> None:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--cache", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--split", choices=["validation", "test"], default="test")
     args = parser.parse_args()
 
     if args.text_provider != "clip":
@@ -65,11 +66,14 @@ def main() -> None:
 
     device = torch.device(args.device)
     train, validation, test = _test_split(args)
-    loader = DataLoader(test, batch_sampler=BucketBatchSampler(test, args.batch_size, seed=args.seed), collate_fn=pixel_art_collate)
+    eval_set = validation if args.split == "validation" else test
+    loader = DataLoader(eval_set, batch_sampler=BucketBatchSampler(eval_set, args.batch_size, seed=args.seed), collate_fn=pixel_art_collate)
     color = IndexedColorModel.load_checkpoint(args.color_checkpoint, map_location=device).to(device).eval()
     hierarchy = HierarchicalMaskGIT.load_checkpoint(args.hierarchy, map_location=device).to(device).eval()
     text_encoder = FrozenPretrainedTextEncoder(TextEncoderConfig(dim=color.config.text_dim, provider="clip", device=args.device))
     vlm = FrozenVisionLanguageEncoder(TextEncoderConfig(provider="clip", device=args.device))
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
     targets = []
     generated = []
@@ -93,7 +97,18 @@ def main() -> None:
         prompts.extend(batch_prompts)
 
     metrics = compute_quality_metrics(generated, targets, prompts, encoder=vlm, latency_ms=total_latency / max(len(generated), 1)).__dict__
-    report = {"metrics": metrics, "split": split_report(train, validation, test), "generation": {"width": args.width, "height": args.height, "used_heldout_structure": False}}
+    report = {
+        "metrics": metrics,
+        "split": split_report(train, validation, test),
+        "eval_split": args.split,
+        "generation": {
+            "width": args.width,
+            "height": args.height,
+            "used_heldout_structure": False,
+            "samples_per_second": 1000.0 * len(generated) / max(total_latency, 1e-9),
+            "vram_peak_mb": torch.cuda.max_memory_allocated(device) / 1024 / 1024 if device.type == "cuda" else 0.0,
+        },
+    }
     save_metrics(report, args.metrics)
     save_comparison_gallery(targets, generated, args.gallery, prompts)
     print(json.dumps(report, sort_keys=True))

@@ -157,5 +157,6 @@ def tokenizer_metrics(
         "accuracy": accuracy,
         "silhouette_accuracy": silhouette,
         "codes_used": float(used),
+        "dead_codes": float(codebook_size - used),
         "perplexity": float(entropy.exp().item()),
     }

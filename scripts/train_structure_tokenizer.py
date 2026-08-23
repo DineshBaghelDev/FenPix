@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader, Subset
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fenpix.dataset import PixelArtDataset, filtered_indices, pixel_art_collate, split_report, train_val_test_split
+from fenpix.training import append_jsonl, load_training_checkpoint, save_training_checkpoint, set_deterministic
 from fenpix.tokenizer import (
     StructureTokenizer,
     StructureTokenizerConfig,
@@ -53,6 +54,7 @@ def _save_grid(targets: torch.Tensor, logits: torch.Tensor, valid: torch.Tensor,
 
 
 def train(args: argparse.Namespace) -> dict[str, float]:
+    set_deterministic(args.seed)
     device = torch.device(args.device)
     dataset = PixelArtDataset(args.data, max_colors=args.max_colors, cache=args.cache)
     keep = filtered_indices(dataset, max_bucket_size=args.max_size, include_lossy=args.include_lossy, limit=args.limit)
@@ -69,31 +71,42 @@ def train(args: argparse.Namespace) -> dict[str, float]:
     )
     model = StructureTokenizer(config).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
+    start_epoch = load_training_checkpoint(args.resume, model, opt, device) + 1 if args.resume else 1
     last_metrics: dict[str, float] = {}
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         model.train()
         total_loss = 0.0
         steps = 0
+        opt.zero_grad(set_to_none=True)
         for batch in loader:
             x, targets, valid = _batch_to_model(batch, device, config.num_structure_classes)
-            out = model(x)
-            recon_loss = masked_cross_entropy(out["logits"], targets, valid)
-            loss = recon_loss + out["vq_loss"]
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
+            with torch.amp.autocast("cuda", enabled=args.amp and device.type == "cuda"):
+                out = model(x)
+                recon_loss = masked_cross_entropy(out["logits"], targets, valid)
+                loss = (recon_loss + out["vq_loss"]) / args.grad_accum
+            scaler.scale(loss).backward()
+            if (steps + 1) % args.grad_accum == 0:
+                scaler.step(opt)
+                scaler.update()
+                opt.zero_grad(set_to_none=True)
             total_loss += float(loss.item())
             steps += 1
+        if steps % args.grad_accum:
+            scaler.step(opt)
+            scaler.update()
+            opt.zero_grad(set_to_none=True)
 
         last_metrics = _validation_metrics(model, validation_loader, device, config)
-        last_metrics["loss"] = total_loss / max(steps, 1)
+        last_metrics["loss"] = total_loss * args.grad_accum / max(steps, 1)
         last_metrics["split"] = split_report(train_set, validation_set, test_set)
-        print(json.dumps({"epoch": epoch, **last_metrics}, sort_keys=True))
+        row = {"epoch": epoch, **last_metrics}
+        append_jsonl(args.log, row)
+        print(json.dumps(row, sort_keys=True))
 
     if args.checkpoint:
-        Path(args.checkpoint).parent.mkdir(parents=True, exist_ok=True)
-        model.save_checkpoint(args.checkpoint, extra={"metrics": last_metrics})
+        save_training_checkpoint(args.checkpoint, model, opt, args.epochs, last_metrics)
     if args.viz:
         model.eval()
         batch = next(iter(loader))
@@ -114,6 +127,11 @@ def _validation_metrics(model, loader, device: torch.device, config: StructureTo
         x, targets, valid = _batch_to_model(batch, device, config.num_structure_classes)
         out = model(x)
         metrics = tokenizer_metrics(out["logits"], targets, valid, out["codes"], config.codebook_size)
+        pred = out["logits"].argmax(dim=1)
+        metrics["reconstruction_quality"] = metrics["accuracy"]
+        for bucket_size in batch["bucket_size"].unique().tolist():
+            rows = batch["bucket_size"].eq(bucket_size)
+            metrics[f"boundary_f1_{int(bucket_size)}"] = _boundary_f1_tokens(pred[rows], targets[rows], valid[rows])
         for key, value in metrics.items():
             totals[key] = totals.get(key, 0.0) + float(value)
         steps += 1
@@ -121,6 +139,29 @@ def _validation_metrics(model, loader, device: torch.device, config: StructureTo
     if last_batch is None:
         return {}
     return {f"validation_{key}": value / max(steps, 1) for key, value in totals.items()}
+
+
+def _boundary_f1_tokens(pred: torch.Tensor, target: torch.Tensor, valid: torch.Tensor) -> float:
+    def edge(x: torch.Tensor, m: torch.Tensor) -> torch.Tensor:
+        e = torch.zeros_like(m)
+        e[1:] |= (x[1:] != x[:-1]) & m[1:] & m[:-1]
+        e[:-1] |= (x[1:] != x[:-1]) & m[1:] & m[:-1]
+        e[:, 1:] |= (x[:, 1:] != x[:, :-1]) & m[:, 1:] & m[:, :-1]
+        e[:, :-1] |= (x[:, 1:] != x[:, :-1]) & m[:, 1:] & m[:, :-1]
+        return e
+
+    pred_edges = []
+    target_edges = []
+    for p, t, m in zip(pred.cpu(), target.cpu(), valid.cpu()):
+        pred_edges.append(edge(p, m))
+        target_edges.append(edge(t, m))
+    pred_edge = torch.stack(pred_edges)
+    target_edge = torch.stack(target_edges)
+    tp = (pred_edge & target_edge).sum().item()
+    fp = (pred_edge & ~target_edge).sum().item()
+    fn = (~pred_edge & target_edge).sum().item()
+    denom = 2 * tp + fp + fn
+    return float(1.0 if denom == 0 else (2 * tp) / denom)
 
 
 def main() -> None:
@@ -145,6 +186,10 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=3e-3)
     parser.add_argument("--cache", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--resume", type=Path)
+    parser.add_argument("--log", type=Path, default=Path("runs/m3_train.jsonl"))
+    parser.add_argument("--amp", action="store_true")
+    parser.add_argument("--grad-accum", type=int, default=1)
     args = parser.parse_args()
     train(args)
 
