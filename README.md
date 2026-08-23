@@ -9,7 +9,7 @@ representation the model will use:
 - extract a compact palette, including transparency
 - convert pixels to palette indices
 - reconstruct exact RGBA PNGs when the source has <=64 unique RGBA colors
-- keep variable sizes through a PyTorch `Dataset`
+- batch variable-size indexed images with padding masks and buckets
 
 ## Install
 
@@ -55,20 +55,29 @@ Example metadata:
 }
 ```
 
-`PixelArtDataset` returns one sample per PNG:
+`PixelArtDataset` returns one native-size sample per PNG:
 
 ```python
 {
     "path": "...",
     "indices": LongTensor[height, width],
+    "structure_indices": LongTensor[height, width],
     "palette": UInt8Tensor[colors, 4],
     "size": IntTensor[width, height],
+    "valid_mask": BoolTensor[height, width],
+    "bucket": "64:landscape",
+    "bucket_size": IntTensor[],
+    "aspect_bucket": "landscape",
     "palette_size": IntTensor[],
     "metadata": dict,
 }
 ```
 
-Variable sizes are preserved, so use `pixel_art_collate` when batching.
+Variable sizes are preserved. Use `pixel_art_collate` to stack batches; it pads
+only to the largest native size in the batch and exposes `valid_mask` plus
+`palette_mask`. Use `BucketBatchSampler` for deterministic 32/64/128
+resolution and aspect-ratio buckets, and `train_validation_split` for seeded
+train/validation subsets.
 
 ## Prepare Kenney Assets
 

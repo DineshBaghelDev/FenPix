@@ -3,16 +3,30 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import torch
 from PIL import Image, PngImagePlugin, UnidentifiedImageError
 from torch.utils.data import DataLoader
 
-from fenpix import PixelArtDataset, image_to_indices, pixel_art_collate, reconstruct_rgba
+from fenpix import (
+    BucketBatchSampler,
+    PixelArtDataset,
+    image_to_indices,
+    pixel_art_collate,
+    reconstruct_rgba,
+    train_validation_split,
+)
 
 
 SAMPLES = Path(__file__).parent / "sample_data" / "kenney_tiny_town"
 
 
 class PalettePipelineTest(unittest.TestCase):
+    def _write_rgba(self, path: Path, width: int, height: int, color=(255, 0, 0, 255)):
+        pixels = np.zeros((height, width, 4), dtype=np.uint8)
+        pixels[..., :] = color
+        pixels[0, 0] = [0, 0, 0, 0]
+        Image.fromarray(pixels, "RGBA").save(path)
+
     def test_roundtrip_preserves_native_rgba_when_within_palette_budget(self):
         pixels = np.array(
             [
@@ -78,10 +92,87 @@ class PalettePipelineTest(unittest.TestCase):
             dataset = PixelArtDataset(root)
             batch = next(iter(DataLoader(dataset, batch_size=2, collate_fn=pixel_art_collate)))
 
-        self.assertEqual(len(batch), 2)
-        self.assertEqual(batch[0]["indices"].shape, (3, 2))
-        self.assertEqual(batch[1]["indices"].shape, (1, 4))
-        self.assertEqual(batch[0]["metadata"]["caption"], "red block")
+        self.assertEqual(batch["indices"].shape, (2, 3, 4))
+        self.assertEqual(batch["size"].tolist(), [[2, 3], [4, 1]])
+        self.assertEqual(batch["metadata"][0]["caption"], "red block")
+        self.assertTrue(batch["valid_mask"][0, :3, :2].all())
+        self.assertFalse(batch["valid_mask"][0, :, 2:].any())
+        self.assertTrue(batch["valid_mask"][1, :1, :4].all())
+        self.assertFalse(batch["valid_mask"][1, 1:, :].any())
+
+    def test_m2_mixed_dimensions_transparency_padding_and_batch_shapes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_rgba(root / "icon_32.png", 32, 32)
+            self._write_rgba(root / "wide_64.png", 64, 32, (0, 255, 0, 255))
+            self._write_rgba(root / "tall_128.png", 40, 128, (0, 0, 255, 255))
+
+            dataset = PixelArtDataset(root)
+            batch = next(iter(DataLoader(dataset, batch_size=3, collate_fn=pixel_art_collate)))
+
+        self.assertEqual(batch["indices"].shape, (3, 128, 64))
+        self.assertEqual(batch["structure_indices"].shape, batch["indices"].shape)
+        self.assertEqual(batch["palette"].shape[-1], 4)
+        self.assertEqual(batch["size"].tolist(), [[32, 32], [40, 128], [64, 32]])
+        self.assertEqual(batch["bucket_size"].tolist(), [32, 128, 64])
+        self.assertEqual(batch["aspect_bucket"], ["square", "portrait", "landscape"])
+        self.assertFalse(batch["valid_mask"][0, 32:, :].any())
+        self.assertFalse(batch["valid_mask"][0, :, 32:].any())
+        self.assertTrue((batch["palette"][:, :, 3] == 0).any())
+
+    def test_train_validation_split_is_deterministic(self):
+        dataset = PixelArtDataset(SAMPLES)
+
+        train_a, val_a = train_validation_split(dataset, validation_fraction=0.25, seed=123)
+        train_b, val_b = train_validation_split(dataset, validation_fraction=0.25, seed=123)
+        train_c, val_c = train_validation_split(dataset, validation_fraction=0.25, seed=456)
+
+        self.assertEqual(train_a.indices, train_b.indices)
+        self.assertEqual(val_a.indices, val_b.indices)
+        self.assertNotEqual(val_a.indices, val_c.indices)
+        self.assertEqual(len(train_a) + len(val_a), len(dataset))
+
+    def test_bucket_batch_sampler_groups_aspect_and_resolution_buckets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_rgba(root / "a.png", 20, 20)
+            self._write_rgba(root / "b.png", 30, 20)
+            self._write_rgba(root / "c.png", 64, 20)
+            self._write_rgba(root / "d.png", 32, 64)
+            self._write_rgba(root / "e.png", 128, 80)
+
+            dataset = PixelArtDataset(root)
+            loader = DataLoader(
+                dataset,
+                batch_sampler=BucketBatchSampler(dataset, batch_size=2, seed=7),
+                collate_fn=pixel_art_collate,
+            )
+
+            for batch in loader:
+                self.assertEqual(len(set(batch["bucket"])), 1)
+            buckets = {dataset[i]["bucket"] for i in range(len(dataset))}
+
+        self.assertIn("32:square", buckets)
+        self.assertIn("64:landscape", buckets)
+        self.assertIn("64:portrait", buckets)
+        self.assertIn("128:landscape", buckets)
+
+    def test_cached_and_uncached_outputs_are_identical(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_rgba(root / "sprite.png", 17, 9)
+            (root / "sprite.json").write_text('{"caption":"cached"}', encoding="utf-8")
+
+            uncached = PixelArtDataset(root)[0]
+            cached_dataset = PixelArtDataset(root, cache=True)
+            first_cached = cached_dataset[0]
+            second_cached = PixelArtDataset(root, cache=True)[0]
+
+        for cached in (first_cached, second_cached):
+            self.assertTrue(torch.equal(uncached["indices"], cached["indices"]))
+            self.assertTrue(torch.equal(uncached["palette"], cached["palette"]))
+            self.assertEqual(uncached["dimensions"], cached["dimensions"])
+            self.assertEqual(uncached["metadata"], cached["metadata"])
 
     def test_malformed_png_fails_clearly(self):
         with tempfile.TemporaryDirectory() as tmp:

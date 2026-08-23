@@ -74,7 +74,7 @@ Done when:
 
 ## M2: Batch Format
 
-Status: planned
+Status: complete
 
 Goal: make variable-size indexed pixel art trainable.
 
@@ -256,5 +256,5 @@ Done when:
 
 ## Immediate Next Step
 
-Build M2: batch variable-size indexed pixel art without changing the native
-dataset format.
+Build M3 when ready: a tiny structure tokenizer, separate from color
+assignment.
