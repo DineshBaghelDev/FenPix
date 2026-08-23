@@ -57,6 +57,17 @@ python scripts/train_maskgit.py train data\processed --tokenizer runs\m3_structu
 python scripts/train_maskgit.py sample --checkpoint runs\m5_maskgit.pt --out runs\m5_prompt_samples.png --prompts "red potion icon" "stone house" "grass tile" "small tree"
 ```
 
+## Train Hierarchical Structure
+
+```bash
+python scripts/train_hierarchy.py train data\processed --tokenizer runs\m3_structure_tokenizer.pt --epochs 20 --limit 32
+python scripts/train_hierarchy.py sample --checkpoint runs\m6_hierarchy.pt --out runs\m6_stages.png --width 128 --height 128 --prompts "stone house"
+```
+
+M6 trains small 32, 64, and 128 structure stages. Higher stages condition on
+the lower sampled structure plus the same text embedding, while preserving the
+M2 native-size masks and aspect-ratio buckets.
+
 ## Dataset Shape
 
 Put PNG files under a dataset folder. Optional metadata can sit next to each
@@ -124,10 +135,8 @@ See [MILESTONES.md](MILESTONES.md) for the full milestone map.
 3. Structure tokenizer/VQ, separate from color assignment
 4. Unconditional structure-token MaskGIT
 5. Text-conditioned structure MaskGIT
-6. Variable aspect ratios
-7. Hierarchical 32 -> 64 -> 128 generation
-8. Flow/logit refiner ablation
-9. Joint fine-tuning
-10. Teacher model
-11. Distillation
-12. Quantization + inference optimization
+6. Hierarchical 32 -> 64 -> 128 generation
+7. Palette-logit refiner ablation
+8. Quality pass
+9. Teacher and distillation
+10. Quantization + inference optimization

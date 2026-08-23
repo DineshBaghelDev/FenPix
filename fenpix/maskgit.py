@@ -21,6 +21,7 @@ class MaskGITConfig:
     max_width: int = 32
     text_dim: int = 0
     cond_tokens: int = 1
+    structure_cond: bool = False
 
     @property
     def mask_token_id(self) -> int:
@@ -76,6 +77,9 @@ class MaskGIT(nn.Module):
         if self.config.hidden_dim % self.config.heads:
             raise ValueError("hidden_dim must be divisible by heads")
         self.token_embed = nn.Embedding(self.config.vocab_size + 2, self.config.hidden_dim)
+        self.structure_cond_embed = (
+            nn.Embedding(self.config.vocab_size + 2, self.config.hidden_dim) if self.config.structure_cond else None
+        )
         self.row_embed = nn.Embedding(self.config.max_height, self.config.hidden_dim)
         self.col_embed = nn.Embedding(self.config.max_width, self.config.hidden_dim)
         self.cond_proj = (
@@ -101,6 +105,7 @@ class MaskGIT(nn.Module):
         tokens: torch.Tensor,
         valid_mask: torch.Tensor,
         text_embeddings: torch.Tensor | None = None,
+        structure_condition: torch.Tensor | None = None,
         cond_drop_prob: float = 0.0,
     ) -> torch.Tensor:
         if tokens.shape != valid_mask.shape:
@@ -113,6 +118,13 @@ class MaskGIT(nn.Module):
         rows = torch.arange(height, device=tokens.device)
         cols = torch.arange(width, device=tokens.device)
         x = self.token_embed(x_tokens)
+        if self.structure_cond_embed is not None:
+            if structure_condition is None:
+                structure_condition = torch.full_like(tokens, self.config.pad_token_id)
+            if structure_condition.shape != tokens.shape:
+                raise ValueError("structure_condition must match tokens shape")
+            cond_tokens = structure_condition.masked_fill(~valid_mask, self.config.pad_token_id)
+            x = x + self.structure_cond_embed(cond_tokens)
         x = x + self.row_embed(rows)[None, :, None, :] + self.col_embed(cols)[None, None, :, :]
         x = x.reshape(batch, height * width, self.config.hidden_dim)
         padding = ~valid_mask.reshape(batch, height * width)
@@ -139,6 +151,7 @@ class MaskGIT(nn.Module):
         steps: int = 8,
         temperature: float = 1.0,
         text_embeddings: torch.Tensor | None = None,
+        structure_condition: torch.Tensor | None = None,
         guidance_scale: float = 1.0,
         generator: torch.Generator | None = None,
     ) -> torch.Tensor:
@@ -152,9 +165,9 @@ class MaskGIT(nn.Module):
             still_masked = tokens.eq(self.config.mask_token_id) & valid
             if not still_masked.any():
                 break
-            logits = self(tokens, valid, text_embeddings)
+            logits = self(tokens, valid, text_embeddings, structure_condition)
             if text_embeddings is not None and guidance_scale != 1.0:
-                uncond = self(tokens, valid, None)
+                uncond = self(tokens, valid, None, structure_condition)
                 logits = uncond + (logits - uncond) * guidance_scale
             probs = (logits.clamp(-50, 50) / max(temperature, 1e-6)).softmax(dim=1)
             sampled = torch.multinomial(probs.permute(0, 2, 3, 1).reshape(-1, self.config.vocab_size), 1, generator=generator)

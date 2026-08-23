@@ -167,7 +167,7 @@ Done when:
 
 ## M6: Hierarchical Generation
 
-Status: planned
+Status: complete
 
 Goal: generate progressively from 32x32 to 64x64 to 128x128.
 
@@ -177,11 +177,18 @@ Deliverables:
 - 64x64 refinement stage.
 - 128x128 refinement stage.
 - Aspect-ratio buckets.
+- Checkpoint save/load.
+- Training and sampling CLI with all-stage visualization.
 
 Done when:
 
 - The same prompt can produce icons, sprites, tiles, and small scenes at
   different native sizes.
+
+M6 smoke result:
+
+- A 4-image mixed 32/64/128 smoke run trained all three stages, saved/loaded a
+  checkpoint, and wrote 32 -> 64 -> 128 sample grids.
 
 ## M7: Palette-Logit Refiner Ablation
 
