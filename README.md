@@ -70,6 +70,16 @@ Example metadata:
 
 Variable sizes are preserved, so use `pixel_art_collate` when batching.
 
+## Prepare Kenney Assets
+
+```bash
+python scripts/prepare_kenney.py data/raw data/processed
+```
+
+The processed directory must be empty. It mirrors the input folder or zip paths,
+copies accepted PNG files unchanged, writes matching `.json` sidecars, and
+writes `report.json`.
+
 ## Roadmap
 
 See [MILESTONES.md](MILESTONES.md) for the full milestone map.

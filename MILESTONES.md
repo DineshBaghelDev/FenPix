@@ -50,7 +50,7 @@ Done when:
 
 ## M1: Dataset Ingestion
 
-Status: next
+Status: complete
 
 Goal: create the first useful local dataset in the expected format.
 
@@ -256,6 +256,5 @@ Done when:
 
 ## Immediate Next Step
 
-Build M1: a Kenney-first ingestion script that downloads/imports assets, keeps
-native PNGs, writes sidecar metadata, and verifies the output with the existing
-palette pipeline.
+Build M2: batch variable-size indexed pixel art without changing the native
+dataset format.
