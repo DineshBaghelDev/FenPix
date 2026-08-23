@@ -95,6 +95,14 @@ class StructureTokenizerTest(unittest.TestCase):
 
         self.assertEqual(out["logits"].shape[-2:], batch["indices"].shape[-2:])
 
+    def test_odd_size_logits_match_input(self):
+        model = StructureTokenizer(StructureTokenizerConfig(num_structure_classes=8, codebook_size=11, hidden_dim=16, latent_dim=12))
+        x = torch.randn(2, 8, 21, 21)
+
+        out = model(x)
+
+        self.assertEqual(out["logits"].shape[-2:], (21, 21))
+
     def test_short_overfit_tiny_sample_set(self):
         torch.manual_seed(0)
         with tempfile.TemporaryDirectory() as tmp:

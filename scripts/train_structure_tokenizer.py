@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from time import perf_counter
 
 import torch
 from PIL import Image
@@ -76,6 +77,10 @@ def train(args: argparse.Namespace) -> dict[str, float]:
     last_metrics: dict[str, float] = {}
 
     for epoch in range(start_epoch, args.epochs + 1):
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+        started = perf_counter()
+        images = 0
         model.train()
         total_loss = 0.0
         steps = 0
@@ -93,13 +98,18 @@ def train(args: argparse.Namespace) -> dict[str, float]:
                 opt.zero_grad(set_to_none=True)
             total_loss += float(loss.item())
             steps += 1
+            images += int(batch["indices"].shape[0])
         if steps % args.grad_accum:
             scaler.step(opt)
             scaler.update()
             opt.zero_grad(set_to_none=True)
 
+        seconds = perf_counter() - started
         last_metrics = _validation_metrics(model, validation_loader, device, config)
         last_metrics["loss"] = total_loss * args.grad_accum / max(steps, 1)
+        last_metrics["seconds"] = seconds
+        last_metrics["images_per_second"] = images / max(seconds, 1e-9)
+        last_metrics["peak_vram_mb"] = torch.cuda.max_memory_reserved(device) / 1024 / 1024 if device.type == "cuda" else 0.0
         last_metrics["split"] = split_report(train_set, validation_set, test_set)
         row = {"epoch": epoch, **last_metrics}
         append_jsonl(args.log, row)

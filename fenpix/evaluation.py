@@ -128,9 +128,12 @@ def grid_pixel_alignment(pred_rgba: np.ndarray) -> float:
 
 def text_image_alignment(prompts: list[str], images: list[Image.Image], encoder: FrozenVisionLanguageEncoder | None = None) -> float:
     encoder = encoder or FrozenVisionLanguageEncoder(TextEncoderConfig())
-    text = encoder.encode(prompts)
-    image = encoder.encode_images(images)
-    return float((text * image).sum(1).mean().item())
+    scores = []
+    for start in range(0, len(images), 64):
+        text = encoder.encode(prompts[start : start + 64])
+        image = encoder.encode_images(images[start : start + 64])
+        scores.append((text * image).sum(1).cpu())
+    return float(torch.cat(scores).mean().item()) if scores else 0.0
 
 
 def compute_quality_metrics(

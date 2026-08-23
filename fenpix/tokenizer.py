@@ -124,6 +124,8 @@ class StructureTokenizer(nn.Module):
         z = self.encoder(x)
         quantized, codes, vq_loss = self.quantizer(z)
         logits = self.decoder(quantized)
+        if logits.shape[-2:] != x.shape[-2:]:
+            logits = F.interpolate(logits, size=x.shape[-2:], mode="nearest")
         return {"logits": logits, "codes": codes, "vq_loss": vq_loss}
 
     def save_checkpoint(self, path: str | Path, extra: dict[str, Any] | None = None) -> None:
