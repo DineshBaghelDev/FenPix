@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, Subset
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fenpix.dataset import BucketBatchSampler, PixelArtDataset, pixel_art_collate
+from fenpix.dataset import BucketBatchSampler, PixelArtDataset, pixel_art_collate, split_report, train_val_test_split
 from fenpix.hierarchy import HierarchicalMaskGIT, HierarchicalMaskGITConfig, stage_tokens_from_batch
 from fenpix.text import FrozenPretrainedTextEncoder, TextEmbeddingCache, TextEncoderConfig
 from fenpix.tokenizer import StructureTokenizer
@@ -60,9 +60,15 @@ def train(args: argparse.Namespace) -> dict[str, float]:
     text_encoder = FrozenPretrainedTextEncoder(TextEncoderConfig(dim=args.text_dim, provider=args.text_provider, device=args.device))
     text_cache = TextEmbeddingCache(args.embedding_cache, text_encoder) if args.embedding_cache else None
     dataset = _dataset(args)
+    train_set, validation_set, test_set = train_val_test_split(dataset, args.validation_fraction, args.test_fraction, args.seed)
     loader = DataLoader(
-        dataset,
-        batch_sampler=BucketBatchSampler(dataset, args.batch_size, seed=args.seed),
+        train_set,
+        batch_sampler=BucketBatchSampler(train_set, args.batch_size, seed=args.seed),
+        collate_fn=pixel_art_collate,
+    )
+    validation_loader = DataLoader(
+        validation_set,
+        batch_sampler=BucketBatchSampler(validation_set, args.batch_size, seed=args.seed),
         collate_fn=pixel_art_collate,
     )
     config = HierarchicalMaskGITConfig(
@@ -105,7 +111,7 @@ def train(args: argparse.Namespace) -> dict[str, float]:
             loss.backward()
             opt.step()
             steps += 1
-        last = {"epoch": epoch} | {f"loss_{stage}": totals[stage] / max(steps, 1) for stage in config.stages}
+        last = {"epoch": epoch, "validation_loss": _validation_loss(model, validation_loader, tokenizer, text_encoder, config, args, device), "split": split_report(train_set, validation_set, test_set)} | {f"loss_{stage}": totals[stage] / max(steps, 1) for stage in config.stages}
         print(json.dumps(last, sort_keys=True))
 
     if args.checkpoint:
@@ -115,6 +121,24 @@ def train(args: argparse.Namespace) -> dict[str, float]:
         sample_args = argparse.Namespace(**(vars(args) | {"out": args.viz}))
         sample(sample_args)
     return last
+
+
+@torch.no_grad()
+def _validation_loss(model, loader, tokenizer, text_encoder, config, args, device: torch.device) -> float:
+    model.eval()
+    total = 0.0
+    steps = 0
+    for batch in loader:
+        text_embeddings = text_encoder.encode(_captions(batch)).to(device)
+        tokens = {stage: stage_tokens_from_batch(batch, tokenizer, stage, device) for stage in config.stages}
+        loss = torch.zeros((), device=device)
+        previous = None
+        for stage in config.stages:
+            loss = loss + model.stage_loss(stage, tokens[stage][0], tokens[stage][1], text_embeddings, *(previous or (None, None)))
+            previous = tokens[stage]
+        total += float(loss.item())
+        steps += 1
+    return total / max(steps, 1)
 
 
 def sample(args: argparse.Namespace) -> None:
@@ -150,6 +174,8 @@ def main() -> None:
     train_parser.add_argument("--epochs", type=int, default=20)
     train_parser.add_argument("--batch-size", type=int, default=4)
     train_parser.add_argument("--limit", type=int, default=32)
+    train_parser.add_argument("--validation-fraction", type=float, default=0.2)
+    train_parser.add_argument("--test-fraction", type=float, default=0.2)
     train_parser.add_argument("--max-colors", type=int, default=64)
     train_parser.add_argument("--hidden-dim", type=int, default=64)
     train_parser.add_argument("--depth", type=int, default=2)

@@ -93,7 +93,7 @@ def prepare_kenney(
     }
 
     try:
-        for path in sorted(p for p in root.rglob("*") if p.is_file()):
+        for path in sorted(p for p in root.rglob("*") if p.is_file() and not any(part.startswith(".") for part in p.relative_to(root).parts)):
             report["total_scanned"] += 1
             if path.suffix.lower() != ".png":
                 _reject("unsupported_format", report)

@@ -129,15 +129,14 @@ writes `report.json`.
 ## Quality Baseline
 
 ```bash
-python scripts\evaluate_quality.py data\processed --tokenizer runs\m3_structure_tokenizer.pt --color-checkpoint runs\m8_1_color.pt --use-heldout-structure --metrics runs\m8_1_metrics.json --gallery runs\m8_1_gallery.png
+python scripts\evaluate_quality.py data\processed --hierarchy runs\m6_hierarchy.pt --color-checkpoint runs\m8_1_color.pt --metrics runs\m8_1_metrics.json --gallery runs\m8_1_gallery.png
 ```
 
-M8.1 evaluates true held-out generation from a color checkpoint. It uses frozen
-CLIP text embeddings and CLIP image/text similarity, defaults training to
-lossless samples only, and reports palette fidelity, transparency IoU, boundary
-F1, connected-component consistency, grid alignment, text-image alignment, split
-counts, and latency. `--use-heldout-structure` is an explicit smoke fallback
-when no trained hierarchy checkpoint is being evaluated.
+M8.1 evaluates prompt-only held-out generation from hierarchy and color
+checkpoints. It uses frozen CLIP text embeddings and CLIP image/text similarity,
+defaults training to lossless samples only, and reports palette fidelity,
+transparency IoU, boundary F1, connected-component consistency, grid alignment,
+text-image alignment, split counts, and latency.
 
 ## Roadmap
 

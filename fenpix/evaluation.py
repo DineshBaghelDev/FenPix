@@ -41,6 +41,17 @@ def _to_numpy_rgba(image: Image.Image | np.ndarray) -> np.ndarray:
     return np.asarray(image.convert("RGBA") if isinstance(image, Image.Image) else image, dtype=np.uint8)
 
 
+def _fit_rgba_to_shape(rgba: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    height, width = shape
+    if rgba.shape[:2] == shape:
+        return rgba
+    out = np.zeros((height, width, 4), dtype=np.uint8)
+    copy_h = min(height, rgba.shape[0])
+    copy_w = min(width, rgba.shape[1])
+    out[:copy_h, :copy_w] = rgba[:copy_h, :copy_w]
+    return out
+
+
 def _alpha_mask(rgba: np.ndarray) -> np.ndarray:
     return rgba[..., 3] >= 128
 
@@ -131,7 +142,7 @@ def compute_quality_metrics(
     latency_ms: float = 0.0,
 ) -> QualityMetrics:
     pred = [_to_numpy_rgba(image) for image in pred_images]
-    target = [_to_numpy_rgba(image) for image in target_images]
+    target = [_fit_rgba_to_shape(_to_numpy_rgba(image), p.shape[:2]) for p, image in zip(pred, target_images)]
     return QualityMetrics(
         palette_fidelity=float(np.mean([palette_fidelity(p, t) for p, t in zip(pred, target)])),
         transparency_iou=float(np.mean([transparency_iou(p, t) for p, t in zip(pred, target)])),
@@ -159,8 +170,8 @@ def save_comparison_gallery(
     rows = []
     font_h = 14
     for row in range(min(max_items, len(generated))):
-        target = _to_numpy_rgba(targets[row])
         pred = _to_numpy_rgba(generated[row])
+        target = _fit_rgba_to_shape(_to_numpy_rgba(targets[row]), pred.shape[:2])
         strip = np.concatenate([target, pred], axis=1)
         label = Image.new("RGBA", (strip.shape[1], font_h), (255, 255, 255, 255))
         ImageDraw.Draw(label).text((2, 1), prompts[row % len(prompts)][:80], fill=(0, 0, 0, 255))

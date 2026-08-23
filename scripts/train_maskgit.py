@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, Subset
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fenpix.dataset import PixelArtDataset, pixel_art_collate
+from fenpix.dataset import PixelArtDataset, pixel_art_collate, split_report, train_val_test_split
 from fenpix.maskgit import MaskGIT, MaskGITConfig, maskgit_loss, random_mask_tokens
 from fenpix.text import FrozenPretrainedTextEncoder, TextEmbeddingCache, TextEncoderConfig
 from fenpix.tokenizer import StructureTokenizer, canonical_structure_indices, structure_one_hot
@@ -78,7 +78,9 @@ def train(args: argparse.Namespace) -> dict[str, float]:
     tokenizer = StructureTokenizer.load_checkpoint(args.tokenizer, map_location=device).to(device).eval()
     text_encoder = FrozenPretrainedTextEncoder(TextEncoderConfig(dim=args.text_dim, provider=args.text_provider, device=args.device))
     text_cache = TextEmbeddingCache(args.embedding_cache, text_encoder) if args.embedding_cache else None
-    loader = DataLoader(_dataset(args), batch_size=args.batch_size, shuffle=True, collate_fn=pixel_art_collate)
+    train_set, validation_set, test_set = train_val_test_split(_dataset(args), args.validation_fraction, args.test_fraction, args.seed)
+    loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, collate_fn=pixel_art_collate)
+    validation_loader = DataLoader(validation_set, batch_size=args.batch_size, shuffle=False, collate_fn=pixel_art_collate)
     first_tokens, _ = _tokens_from_batch(next(iter(loader)), tokenizer, device)
     config = MaskGITConfig(
         vocab_size=tokenizer.config.codebook_size,
@@ -109,7 +111,12 @@ def train(args: argparse.Namespace) -> dict[str, float]:
             opt.step()
             total += float(loss.item())
             steps += 1
-        last = {"epoch": epoch, "loss": total / max(steps, 1)}
+        last = {
+            "epoch": epoch,
+            "loss": total / max(steps, 1),
+            "validation_loss": _validation_loss(model, validation_loader, tokenizer, text_encoder, args, device),
+            "split": split_report(train_set, validation_set, test_set),
+        }
         print(json.dumps(last, sort_keys=True))
 
     if args.checkpoint:
@@ -125,6 +132,20 @@ def train(args: argparse.Namespace) -> dict[str, float]:
             samples = model.sample(tuple(valid.shape), valid, steps=args.sample_steps, text_embeddings=text_embeddings, guidance_scale=args.guidance_scale)
         _save_token_grid(samples, valid, Path(args.viz), config.vocab_size)
     return last
+
+
+@torch.no_grad()
+def _validation_loss(model, loader, tokenizer, text_encoder, args, device: torch.device) -> float:
+    model.eval()
+    total = 0.0
+    steps = 0
+    for batch in loader:
+        tokens, valid = _tokens_from_batch(batch, tokenizer, device)
+        text_embeddings = text_encoder.encode(_captions(batch)).to(device)
+        masked, labels = random_mask_tokens(tokens, valid, model.config.mask_token_id)
+        total += float(maskgit_loss(model(masked, valid, text_embeddings), labels).item())
+        steps += 1
+    return total / max(steps, 1)
 
 
 def sample(args: argparse.Namespace) -> None:
@@ -160,6 +181,8 @@ def main() -> None:
     train_parser.add_argument("--epochs", type=int, default=20)
     train_parser.add_argument("--batch-size", type=int, default=8)
     train_parser.add_argument("--limit", type=int, default=32)
+    train_parser.add_argument("--validation-fraction", type=float, default=0.2)
+    train_parser.add_argument("--test-fraction", type=float, default=0.2)
     train_parser.add_argument("--max-colors", type=int, default=64)
     train_parser.add_argument("--hidden-dim", type=int, default=128)
     train_parser.add_argument("--depth", type=int, default=4)
@@ -176,6 +199,7 @@ def main() -> None:
     train_parser.add_argument("--guidance-scale", type=float, default=2.0)
     train_parser.add_argument("--prompts", nargs="*")
     train_parser.add_argument("--cache", action="store_true")
+    train_parser.add_argument("--seed", type=int, default=0)
     train_parser.set_defaults(func=train)
 
     sample_parser = sub.add_parser("sample")

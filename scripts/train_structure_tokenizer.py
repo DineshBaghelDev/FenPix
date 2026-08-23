@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader, Subset
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fenpix.dataset import PixelArtDataset, pixel_art_collate
+from fenpix.dataset import PixelArtDataset, filtered_indices, pixel_art_collate, split_report, train_val_test_split
 from fenpix.tokenizer import (
     StructureTokenizer,
     StructureTokenizerConfig,
@@ -55,9 +55,10 @@ def _save_grid(targets: torch.Tensor, logits: torch.Tensor, valid: torch.Tensor,
 def train(args: argparse.Namespace) -> dict[str, float]:
     device = torch.device(args.device)
     dataset = PixelArtDataset(args.data, max_colors=args.max_colors, cache=args.cache)
-    if args.limit:
-        dataset = Subset(dataset, list(range(min(args.limit, len(dataset)))))
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, collate_fn=pixel_art_collate)
+    keep = filtered_indices(dataset, max_bucket_size=args.max_size, include_lossy=args.include_lossy, limit=args.limit)
+    train_set, validation_set, test_set = train_val_test_split(Subset(dataset, keep), args.validation_fraction, args.test_fraction, args.seed)
+    loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, collate_fn=pixel_art_collate)
+    validation_loader = DataLoader(validation_set, batch_size=args.batch_size, shuffle=False, collate_fn=pixel_art_collate)
 
     config = StructureTokenizerConfig(
         num_structure_classes=args.structure_classes,
@@ -85,21 +86,41 @@ def train(args: argparse.Namespace) -> dict[str, float]:
             total_loss += float(loss.item())
             steps += 1
 
-        model.eval()
-        batch = next(iter(loader))
-        x, targets, valid = _batch_to_model(batch, device, config.num_structure_classes)
-        with torch.no_grad():
-            out = model(x)
-            last_metrics = tokenizer_metrics(out["logits"], targets, valid, out["codes"], config.codebook_size)
-            last_metrics["loss"] = total_loss / max(steps, 1)
+        last_metrics = _validation_metrics(model, validation_loader, device, config)
+        last_metrics["loss"] = total_loss / max(steps, 1)
+        last_metrics["split"] = split_report(train_set, validation_set, test_set)
         print(json.dumps({"epoch": epoch, **last_metrics}, sort_keys=True))
 
     if args.checkpoint:
         Path(args.checkpoint).parent.mkdir(parents=True, exist_ok=True)
         model.save_checkpoint(args.checkpoint, extra={"metrics": last_metrics})
     if args.viz:
+        model.eval()
+        batch = next(iter(loader))
+        x, targets, valid = _batch_to_model(batch, device, config.num_structure_classes)
+        with torch.no_grad():
+            out = model(x)
         _save_grid(targets, out["logits"], valid, Path(args.viz))
     return last_metrics
+
+
+@torch.no_grad()
+def _validation_metrics(model, loader, device: torch.device, config: StructureTokenizerConfig) -> dict[str, float]:
+    model.eval()
+    totals: dict[str, float] = {}
+    steps = 0
+    last_batch = None
+    for batch in loader:
+        x, targets, valid = _batch_to_model(batch, device, config.num_structure_classes)
+        out = model(x)
+        metrics = tokenizer_metrics(out["logits"], targets, valid, out["codes"], config.codebook_size)
+        for key, value in metrics.items():
+            totals[key] = totals.get(key, 0.0) + float(value)
+        steps += 1
+        last_batch = (targets, valid, out)
+    if last_batch is None:
+        return {}
+    return {f"validation_{key}": value / max(steps, 1) for key, value in totals.items()}
 
 
 def main() -> None:
@@ -111,7 +132,11 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--limit", type=int, default=32)
+    parser.add_argument("--validation-fraction", type=float, default=0.2)
+    parser.add_argument("--test-fraction", type=float, default=0.2)
+    parser.add_argument("--include-lossy", action="store_true")
     parser.add_argument("--max-colors", type=int, default=64)
+    parser.add_argument("--max-size", type=int, default=128)
     parser.add_argument("--structure-classes", type=int, default=65)
     parser.add_argument("--codebook-size", type=int, default=128)
     parser.add_argument("--latent-dim", type=int, default=128)
@@ -119,6 +144,7 @@ def main() -> None:
     parser.add_argument("--downsample", type=int, default=4)
     parser.add_argument("--lr", type=float, default=3e-3)
     parser.add_argument("--cache", action="store_true")
+    parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     train(args)
 
