@@ -31,6 +31,16 @@ python -m unittest discover -s tests
 python examples/visualize_roundtrip.py path\to\image.png --out roundtrip.png
 ```
 
+## Train Structure Tokenizer
+
+```bash
+python scripts/train_structure_tokenizer.py data\processed --epochs 20 --limit 32
+```
+
+The M3 tokenizer learns local structure-region IDs from indexed sprites. It
+uses transparency and per-image region identity, but ignores RGBA palette values
+so structure stays separate from semantic color.
+
 ## Dataset Shape
 
 Put PNG files under a dataset folder. Optional metadata can sit next to each

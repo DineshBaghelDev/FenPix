@@ -93,7 +93,7 @@ Done when:
 
 ## M3: Tiny Structure Tokenizer
 
-Status: planned
+Status: complete
 
 Goal: learn compact 16x16-ish structure/geometry tokens, separate from color
 assignment.
@@ -116,6 +116,11 @@ Done when:
 
 - Structure tokens preserve silhouette, transparency, layout, and major regions
   without depending on image-local palette index meanings.
+
+M3 smoke result:
+
+- A 24-image 32x32-class overfit run reached 0.996 structure accuracy and
+  0.998 silhouette accuracy with 15/32 codes used.
 
 ## M4: Basic MaskGIT
 

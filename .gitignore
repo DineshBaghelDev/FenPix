@@ -9,4 +9,5 @@ build/
 *.egg-info/
 roundtrip.png
 data/
+runs/
 .fenpix_cache/
