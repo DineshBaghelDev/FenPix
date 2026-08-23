@@ -214,21 +214,29 @@ Done when:
 
 ## M8: Quality Pass
 
-Status: planned
+Status: complete
 
 Goal: improve quality-per-parameter before scaling.
 
 Deliverables:
 
-- Better captions/tags.
-- Dataset quality scoring.
-- Duplicate removal.
-- Prompt eval set.
-- Sample gallery.
+- Frozen small pretrained-style text encoder.
+- Fixed prompt eval set across sprites, icons, tiles, objects, buildings,
+  scenes, isometric art, and transparency.
+- Quality metrics for structure, indices, palette validity, transparency,
+  edges/detail, text alignment, and latency.
+- Dataset duplicate and quality scoring hooks.
+- Baseline color vs 1/2/4-step flow-refiner comparison gallery.
 
 Done when:
 
 - The small model has a repeatable eval loop and visible quality trend.
+
+M8 smoke result:
+
+- The local Kenney smoke set wrote `runs/m8_metrics.json` and
+  `runs/m8_gallery.png`; flow refinement stayed disabled by default because it
+  did not clearly beat the color baseline overall.
 
 ## M9: Teacher And Distillation
 

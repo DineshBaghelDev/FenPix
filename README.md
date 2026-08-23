@@ -48,8 +48,8 @@ python scripts/train_maskgit.py train data\processed --tokenizer runs\m3_structu
 python scripts/train_maskgit.py sample --checkpoint runs\m5_maskgit.pt --out runs\m5_samples.png
 ```
 
-M4/M5 use only 32x32-class M3 structure-token grids. M5 adds a frozen tiny hash
-text encoder, cached text embeddings, conditioning tokens, and classifier-free
+M4/M5 use only 32x32-class M3 structure-token grids. M5 adds a frozen tiny
+pretrained-style text encoder, cached text embeddings, conditioning tokens, and classifier-free
 guidance:
 
 ```bash
@@ -125,6 +125,18 @@ python scripts/prepare_kenney.py data/raw data/processed
 The processed directory must be empty. It mirrors the input folder or zip paths,
 copies accepted PNG files unchanged, writes matching `.json` sidecars, and
 writes `report.json`.
+
+## Quality Baseline
+
+```bash
+python scripts/evaluate_quality.py data\processed --metrics runs\m8_metrics.json --gallery runs\m8_gallery.png
+```
+
+M8 evaluates a fixed prompt set across sprites, icons, tiles, objects,
+buildings, scenes, isometric art, and transparency. It reports structure,
+index, palette, transparency, edge/detail, text-alignment, and latency metrics,
+then compares the color baseline with 1/2/4 flow-refiner steps. Flow refinement
+stays disabled unless it clearly beats the baseline.
 
 ## Roadmap
 

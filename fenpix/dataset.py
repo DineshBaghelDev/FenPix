@@ -219,3 +219,40 @@ def pixel_art_collate(samples: list[dict[str, Any]]) -> dict[str, Any]:
         "dimensions": [sample["dimensions"] for sample in samples],
         "metadata": [sample["metadata"] for sample in samples],
     }
+
+
+def quality_score(sample: dict[str, Any]) -> float:
+    indices = sample["indices"].numpy() if isinstance(sample["indices"], torch.Tensor) else sample["indices"]
+    palette_size = int(sample["palette_size"])
+    unique = int(sample["unique_color_count"])
+    height, width = indices.shape
+    edge_h = indices[1:] != indices[:-1]
+    edge_w = indices[:, 1:] != indices[:, :-1]
+    edge_density = (edge_h.sum() + edge_w.sum()) / max(1, edge_h.size + edge_w.size)
+    palette_fit = min(1.0, unique / max(1, palette_size))
+    size_fit = min(1.0, max(height, width) / max(BUCKET_SIZES))
+    lossy_penalty = 0.25 if sample["lossy"] else 0.0
+    return float(max(0.0, min(1.0, 0.35 * palette_fit + 0.35 * edge_density + 0.30 * size_fit - lossy_penalty)))
+
+
+def dataset_quality_report(dataset: Dataset) -> dict[str, Any]:
+    seen: dict[str, str] = {}
+    duplicates: list[dict[str, str]] = []
+    scores: list[float] = []
+    for index in range(len(dataset)):
+        sample = dataset[index]
+        path = Path(sample["path"])
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest in seen:
+            duplicates.append({"path": str(path), "duplicate_of": seen[digest]})
+        else:
+            seen[digest] = str(path)
+        scores.append(quality_score(sample))
+    return {
+        "count": len(dataset),
+        "duplicate_count": len(duplicates),
+        "duplicates": duplicates,
+        "mean_quality": float(sum(scores) / max(1, len(scores))),
+        "min_quality": float(min(scores) if scores else 0.0),
+        "max_quality": float(max(scores) if scores else 0.0),
+    }
