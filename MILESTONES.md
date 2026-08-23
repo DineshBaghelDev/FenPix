@@ -7,27 +7,30 @@ fast inference on small consumer hardware.
 
 ## What We Are Building
 
-The model predicts pixel art as palette indices, not blurred RGB images.
+The model predicts pixel art as palette-conditioned indices, not blurred RGB
+images. An index only has meaning together with its image palette: index `3`
+can be blue in one image and gold in another.
 
 ```text
 prompt
   -> frozen text encoder
   -> coarse structure tokens
   -> dynamic palette
-  -> hierarchical MaskGIT indices
-  -> tiny flow refiner over logits
+  -> palette-conditioned hierarchical MaskGIT indices
+  -> optional tiny flow/logit refiner ablation
   -> argmax palette index
   -> exact RGBA PNG
 ```
 
 The important bet is simple: keep the generation space discrete and
-palette-aware so the final image stays sharp.
+palette-aware so the final image stays sharp. Geometry/structure and color
+assignment should stay separable where possible.
 
 ## M0: Representation Pipeline
 
 Status: started
 
-Goal: prove every image can become model-ready data and roundtrip back to PNG.
+Goal: prove every image can become model-ready data and reconstruct back to PNG.
 
 Deliverables:
 
@@ -36,13 +39,14 @@ Deliverables:
 - Convert RGBA pixels to palette-index tensors.
 - Reconstruct indexed tensors back to RGBA PNG.
 - Preserve width, height, transparency, and metadata.
-- Add tests for exact roundtrip and variable sizes.
+- Add tests for exact roundtrip under the palette budget and variable sizes.
 
 Done when:
 
 - A folder of PNGs can be scanned.
 - Each image produces `indices`, `palette`, `size`, and `metadata`.
-- Reconstruction works for images inside the palette budget.
+- Exact reconstruction works when the source image has <=64 unique RGBA colors.
+- Images above the palette budget are marked as lossy quantized encodings.
 
 ## M1: Dataset Ingestion
 
@@ -91,12 +95,16 @@ Done when:
 
 Status: planned
 
-Goal: learn compact 16x16-ish structure tokens from indexed pixel art.
+Goal: learn compact 16x16-ish structure/geometry tokens, separate from color
+assignment.
 
 Deliverables:
 
-- Small VQ/tokenizer model.
-- Reconstruction loss over palette/index targets.
+- Small structure tokenizer/VQ model.
+- Inputs that emphasize silhouette, transparency, edges, and coarse regions.
+- Color assignment handled separately through the dynamic palette/index head.
+- Reconstruction losses that report structure quality separately from color
+  accuracy.
 - Checkpoint save/load.
 - Reconstruction visualization grid.
 
@@ -106,17 +114,20 @@ Target size:
 
 Done when:
 
-- Reconstructions preserve silhouette, transparency, and major color regions.
+- Structure tokens preserve silhouette, transparency, layout, and major regions
+  without depending on image-local palette index meanings.
 
 ## M4: Basic MaskGIT
 
 Status: planned
 
-Goal: generate palette indices from masked tokens without text conditioning.
+Goal: generate palette-conditioned indices from masked tokens without text
+conditioning.
 
 Deliverables:
 
-- Tiny transformer over indexed tokens.
+- Tiny transformer over structure tokens, palette embeddings, and indexed
+  targets.
 - Masked-token training.
 - Iterative decode sampler.
 - 32x32 generation first.
@@ -165,17 +176,19 @@ Done when:
 - The same prompt can produce icons, sprites, tiles, and small scenes at
   different native sizes.
 
-## M7: Palette-Logit Flow Refiner
+## M7: Palette-Logit Refiner Ablation
 
 Status: planned
 
-Goal: improve final indexed logits without RGB blur.
+Goal: test whether a tiny flow-matching refiner improves final indexed logits
+more than another small masked-refinement pass.
 
 Deliverables:
 
 - 1-4 step flow-matching refiner.
 - Operates on palette/index logits only.
-- Compare samples with and without refinement.
+- Baseline comparison against an extra MaskGIT refinement pass.
+- Keep only if it wins on quality, latency, or parameter tradeoff.
 
 Target size:
 
@@ -183,8 +196,7 @@ Target size:
 
 Done when:
 
-- Refined outputs improve edges, details, and palette consistency without
-  anti-aliasing.
+- The ablation shows a clear gain without anti-aliasing or unacceptable latency.
 
 ## M8: Quality Pass
 

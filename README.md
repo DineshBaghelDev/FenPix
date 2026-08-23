@@ -8,7 +8,7 @@ representation the model will use:
 - load native PNG/RGBA files without resizing
 - extract a compact palette, including transparency
 - convert pixels to palette indices
-- reconstruct exact RGBA PNGs when the palette budget covers the image
+- reconstruct exact RGBA PNGs when the source has <=64 unique RGBA colors
 - keep variable sizes through a PyTorch `Dataset`
 
 ## Install
@@ -76,12 +76,12 @@ See [MILESTONES.md](MILESTONES.md) for the full milestone map.
 
 1. Dataset pipeline
 2. Palette extraction + indexing
-3. Structure tokenizer/VQ
-4. Basic MaskGIT
+3. Structure tokenizer/VQ, separate from color assignment
+4. Palette-conditioned MaskGIT
 5. Text conditioning
 6. Variable aspect ratios
 7. Hierarchical 32 -> 64 -> 128 generation
-8. Flow refiner over palette/index logits
+8. Flow/logit refiner ablation
 9. Joint fine-tuning
 10. Teacher model
 11. Distillation
