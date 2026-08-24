@@ -104,17 +104,54 @@ Result:
 - `validation_loss`: 6.482417106628418
 - smoke only; proves color can train on direct structure targets
 
+## 64px Quality Validation
+
+Ran the full 5k lossless 64px validation gate on CUDA with seed `0`, CLIP text
+conditioning, CLIP alignment, and no GT structure leakage.
+
+Training:
+
+```powershell
+python scripts\train_direct_structure.py train data\processed_m8_2 --checkpoint runs\m8_7_direct_structure_64.pt --log runs\m8_7_direct_structure_64.jsonl --viz runs\m8_7_direct_structure_64.png --device cuda --epochs 20 --batch-size 4 --limit 5000 --max-size 64 --hidden-dim 96 --depth 8 --text-dim 64 --text-provider clip --embedding-cache runs\m8_5_mixed_only_text_cache.pt --samples 4 --width 64 --height 64 --steps 8 --seed 0 --cache
+python scripts\train_color.py train data\processed_m8_2 --direct-structure-targets --checkpoint runs\m8_7_direct_color_64.pt --log runs\m8_7_direct_color_64.jsonl --viz runs\m8_7_direct_color_64.png --device cuda --epochs 20 --batch-size 4 --limit 5000 --max-size 64 --stage 64 --hidden-dim 64 --depth 2 --heads 4 --text-dim 64 --text-provider clip --embedding-cache runs\m8_5_mixed_only_text_cache.pt --steps 8 --seed 0 --cache
+```
+
+Training results:
+
+- Direct structure epoch 20: `validation_loss=0.5709010775089264`,
+  `validation_token_error=0.34470832186937334`, `peak_vram_mb=1220.0`.
+- Direct-target color epoch 20: `validation_loss=1.4244115733355285`,
+  `peak_vram_mb=738.0`.
+
+Prompt-only validation comparison:
+
+| run | transparency IoU | boundary F1 | component count error | component consistency | largest-component IoU | CLIP alignment | latency ms | VRAM MB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| M8.5 best hierarchy | 0.16821024655745542 | 0.05796293893505675 | 2.558 | 0.4721391882425374 | 0.14554796298143804 | 0.26004207134246826 | 80.62070129987842 | 1359.9423828125 |
+| M8.6 occupancy hierarchy | 0.15840413283124166 | 0.07850395402302514 | 3.938 | 0.6130586807666317 | 0.13671902847692452 | 0.25810956954956055 | 61.29677659989102 | 1360.2734375 |
+| M8.7 direct structure | 0.09996727240540365 | 0.10486492741462107 | 44.003 | 0.07297167478198983 | 0.0705007371058077 | 0.2342495173215866 | 79.48551489997772 | 1355.38330078125 |
+
+Validation artifacts:
+
+- `runs/m8_7_compare_m8_5_all_64_metrics.json`
+- `runs/m8_7_compare_m8_5_all_64_gallery.png`
+- `runs/m8_7_compare_m8_6_occ_64_metrics.json`
+- `runs/m8_7_compare_m8_6_occ_64_gallery.png`
+- `runs/m8_7_direct_64_validation_metrics.json`
+- `runs/m8_7_direct_64_validation_gallery.png`
+- `runs/m8_7_direct_structure_64.pt`
+- `runs/m8_7_direct_structure_64.jsonl`
+- `runs/m8_7_direct_structure_64.png`
+- `runs/m8_7_direct_color_64.pt`
+- `runs/m8_7_direct_color_64.jsonl`
+- `runs/m8_7_direct_color_64.png`
+
 ## Decision
 
-M8.7 is implemented as an architecture path and smoke-proven, not quality-proven.
-
-Next quality gate:
-
-1. Train direct structure at 64px on the existing 5k lossless slice.
-2. Train color with `--direct-structure-targets` on the same slice.
-3. Evaluate validation quality with `--direct-structure`.
-4. Keep only if it beats M8.5 transparency IoU `0.2369` and boundary F1
-   `0.1439`, while keeping component count error far below M8.5 `31.653`.
+NO-WIN. M8.7 only improved boundary F1. It regressed transparency IoU,
+component count error, component consistency, largest-component IoU, and CLIP
+alignment, with no meaningful compute win. Do not make direct structure the
+default architecture, and do not scale this path yet.
 
 ## Working Tree
 
