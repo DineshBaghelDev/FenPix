@@ -11,6 +11,7 @@ from PIL import Image
 from torch.utils.data import Dataset, Sampler, Subset
 
 from .palette import image_to_indices
+from .tokenizer import canonical_structure_indices
 
 
 BUCKET_SIZES = (32, 64, 128)
@@ -319,7 +320,9 @@ def filtered_indices(
         if sample["lossy"] and not include_lossy:
             continue
         keep.append(index)
-    return keep[:limit] if limit else keep
+        if limit and len(keep) >= limit:
+            break
+    return keep
 
 
 def split_report(train: Dataset, validation: Dataset, test: Dataset) -> dict[str, Any]:
@@ -389,10 +392,12 @@ def pixel_art_collate(samples: list[dict[str, Any]]) -> dict[str, Any]:
         palettes[row, :sample_palette_size] = sample["palette"]
         palette_masks[row, :sample_palette_size] = True
 
+    structure_indices = canonical_structure_indices(indices, palettes, masks)
+
     return {
         "path": [sample["path"] for sample in samples],
         "indices": indices,
-        "structure_indices": indices.clone(),
+        "structure_indices": structure_indices,
         "palette": palettes,
         "palette_mask": palette_masks,
         "valid_mask": masks,

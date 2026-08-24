@@ -13,8 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fenpix.color import IndexedColorModel
 from fenpix.dataset import BucketBatchSampler, PixelArtDataset, filtered_indices, pixel_art_collate, split_report, train_val_test_split
 from fenpix.evaluation import compute_quality_metrics, render_indexed_batch, save_comparison_gallery, save_metrics, timed
-from fenpix.hierarchy import HierarchicalMaskGIT, condition_to_shape
+from fenpix.hierarchy import HierarchicalMaskGIT, condition_to_shape, stage_tokens_from_batch
 from fenpix.text import FrozenPretrainedTextEncoder, FrozenVisionLanguageEncoder, TextEncoderConfig
+from fenpix.tokenizer import StructureTokenizer
 
 
 def _captions(batch) -> list[str]:
@@ -28,7 +29,9 @@ def _captions(batch) -> list[str]:
 
 def _test_split(args: argparse.Namespace):
     dataset = PixelArtDataset(args.data, max_colors=args.max_colors, cache=args.cache)
+    print(f"loaded dataset paths={len(dataset)} cache={args.cache}", file=sys.stderr, flush=True)
     keep = filtered_indices(dataset, max_bucket_size=args.max_size, include_lossy=args.include_lossy, limit=args.limit)
+    print(f"filtered keep={len(keep)}", file=sys.stderr, flush=True)
     train, validation, test = train_val_test_split(Subset(dataset, keep), args.validation_fraction, args.test_fraction, args.seed)
     return train, validation, test
 
@@ -39,6 +42,8 @@ def main() -> None:
     parser.add_argument("data", type=Path)
     parser.add_argument("--color-checkpoint", type=Path, required=True)
     parser.add_argument("--hierarchy", type=Path, required=True)
+    parser.add_argument("--tokenizer", type=Path)
+    parser.add_argument("--use-heldout-structure", action="store_true")
     parser.add_argument("--metrics", type=Path, default=Path("runs/m8_1_metrics.json"))
     parser.add_argument("--gallery", type=Path, default=Path("runs/m8_1_gallery.png"))
     parser.add_argument("--limit", type=int, default=12)
@@ -55,23 +60,26 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--guidance-scale", type=float, default=2.0)
     parser.add_argument("--text-provider", choices=["clip", "tiny"], default="clip")
+    parser.add_argument("--alignment-provider", choices=["clip", "tiny"], default="clip")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--cache", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--split", choices=["validation", "test"], default="test")
     args = parser.parse_args()
 
-    if args.text_provider != "clip":
-        raise ValueError("M8.1 held-out evaluation requires --text-provider clip")
-
+    torch.manual_seed(args.seed)
     device = torch.device(args.device)
     train, validation, test = _test_split(args)
     eval_set = validation if args.split == "validation" else test
     loader = DataLoader(eval_set, batch_sampler=BucketBatchSampler(eval_set, args.batch_size, seed=args.seed), collate_fn=pixel_art_collate)
+    print(f"eval batches={len(loader)}", file=sys.stderr, flush=True)
     color = IndexedColorModel.load_checkpoint(args.color_checkpoint, map_location=device).to(device).eval()
     hierarchy = HierarchicalMaskGIT.load_checkpoint(args.hierarchy, map_location=device).to(device).eval()
-    text_encoder = FrozenPretrainedTextEncoder(TextEncoderConfig(dim=color.config.text_dim, provider="clip", device=args.device))
-    vlm = FrozenVisionLanguageEncoder(TextEncoderConfig(provider="clip", device=args.device))
+    tokenizer = StructureTokenizer.load_checkpoint(args.tokenizer, map_location=device).to(device).eval() if args.tokenizer else None
+    if args.use_heldout_structure and tokenizer is None:
+        raise ValueError("--use-heldout-structure requires --tokenizer")
+    text_encoder = FrozenPretrainedTextEncoder(TextEncoderConfig(dim=color.config.text_dim, provider=args.text_provider, device=args.device))
+    vlm = FrozenVisionLanguageEncoder(TextEncoderConfig(provider=args.alignment_provider, device=args.device))
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
 
@@ -79,13 +87,18 @@ def main() -> None:
     generated = []
     prompts = []
     total_latency = 0.0
-    for batch in loader:
+    for step, batch in enumerate(loader, start=1):
+        if step == 1 or step % 10 == 0:
+            print(f"eval batch {step}/{len(loader)}", file=sys.stderr, flush=True)
         batch_prompts = _captions(batch)
         text = text_encoder.encode(batch_prompts).to(device)
 
         def generate():
-            stages = hierarchy.sample(args.width, args.height, batch_prompts, text, args.structure_steps, args.temperature, args.guidance_scale)
-            tokens, token_valid = stages[max(stages)]
+            if args.use_heldout_structure:
+                tokens, token_valid = stage_tokens_from_batch(batch, tokenizer, min(args.width, args.height), device)  # type: ignore[arg-type]
+            else:
+                stages = hierarchy.sample(args.width, args.height, batch_prompts, text, args.structure_steps, args.temperature, args.guidance_scale)
+                tokens, token_valid = stages[max(stages)]
             structure = condition_to_shape(tokens, token_valid, (args.height, args.width), hierarchy.config.vocab_size + 1)
             valid = torch.ones_like(structure, dtype=torch.bool)
             return color.sample(structure, valid, text, args.steps, args.temperature, args.guidance_scale) | {"valid_mask": valid}
@@ -104,7 +117,7 @@ def main() -> None:
         "generation": {
             "width": args.width,
             "height": args.height,
-            "used_heldout_structure": False,
+            "used_heldout_structure": args.use_heldout_structure,
             "samples_per_second": 1000.0 * len(generated) / max(total_latency, 1e-9),
             "vram_peak_mb": torch.cuda.max_memory_allocated(device) / 1024 / 1024 if device.type == "cuda" else 0.0,
         },

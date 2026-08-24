@@ -57,6 +57,15 @@ class StructureTokenizerTest(unittest.TestCase):
 
         self.assertTrue(torch.equal(canonical_structure_indices(indices, palette_a, valid), canonical_structure_indices(indices, palette_b, valid)))
 
+    def test_canonical_structure_splits_disconnected_same_color(self):
+        indices = torch.tensor([[[1, 0, 1], [0, 0, 0], [1, 1, 0]]])
+        palette = torch.tensor([[[0, 0, 0, 0], [255, 0, 0, 255]]], dtype=torch.uint8)
+        valid = indices.ge(0)
+
+        targets = canonical_structure_indices(indices, palette, valid, max_regions=7)
+
+        self.assertEqual(targets.tolist(), [[[1, 0, 2], [0, 0, 0], [3, 3, 0]]])
+
     def test_gradients_reach_encoder_and_codebook(self):
         config = StructureTokenizerConfig(num_structure_classes=8, codebook_size=16, hidden_dim=16, latent_dim=8, downsample=2)
         model = StructureTokenizer(config)

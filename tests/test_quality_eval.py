@@ -10,8 +10,10 @@ from fenpix.evaluation import (
     PROMPT_EVAL_SET,
     boundary_f1,
     compute_quality_metrics,
+    component_count_error,
     connected_component_consistency,
     grid_pixel_alignment,
+    largest_component_iou,
     palette_fidelity,
     save_comparison_gallery,
     save_metrics,
@@ -39,6 +41,8 @@ class QualityEvalTest(unittest.TestCase):
         self.assertEqual(palette_fidelity(pixels, pixels), 1.0)
         self.assertEqual(transparency_iou(pixels, pixels), 1.0)
         self.assertEqual(boundary_f1(pixels, pixels), 1.0)
+        self.assertEqual(component_count_error(pixels, pixels), 0.0)
+        self.assertEqual(largest_component_iou(pixels, pixels), 1.0)
         self.assertEqual(connected_component_consistency(pixels, pixels), 1.0)
         self.assertEqual(grid_pixel_alignment(pixels), 1.0)
 
@@ -52,6 +56,8 @@ class QualityEvalTest(unittest.TestCase):
         self.assertLess(palette_fidelity(pred, target), 1.0)
         self.assertLess(transparency_iou(pred, target), 1.0)
         self.assertLess(boundary_f1(pred, target), 1.0)
+        self.assertGreater(component_count_error(pred, target), 0.0)
+        self.assertLess(largest_component_iou(pred, target), 1.0)
         self.assertLess(connected_component_consistency(pred, target), 1.0)
         self.assertLess(grid_pixel_alignment(pred), 1.0)
 

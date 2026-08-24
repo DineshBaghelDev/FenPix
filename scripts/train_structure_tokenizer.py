@@ -17,7 +17,6 @@ from fenpix.training import append_jsonl, load_training_checkpoint, save_trainin
 from fenpix.tokenizer import (
     StructureTokenizer,
     StructureTokenizerConfig,
-    canonical_structure_indices,
     masked_cross_entropy,
     structure_one_hot,
     tokenizer_metrics,
@@ -25,11 +24,10 @@ from fenpix.tokenizer import (
 
 
 def _batch_to_model(batch, device: torch.device, num_classes: int):
-    indices = batch["structure_indices"].to(device)
-    palette = batch["palette"].to(device)
-    valid = batch["valid_mask"].to(device)
-    targets = canonical_structure_indices(indices, palette, valid, max_regions=num_classes - 1)
-    return structure_one_hot(targets, valid, num_classes), targets, valid
+    indices = batch["structure_indices"]
+    valid = batch["valid_mask"]
+    targets = indices.clamp_max(num_classes - 1)
+    return structure_one_hot(targets, valid, num_classes).to(device), targets.to(device), valid.to(device)
 
 
 def _save_grid(targets: torch.Tensor, logits: torch.Tensor, valid: torch.Tensor, path: Path, max_items: int = 8) -> None:

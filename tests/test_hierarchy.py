@@ -1,3 +1,4 @@
+import argparse
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,7 +16,7 @@ from fenpix.hierarchy import (
     stage_native_shape,
     stage_tokens_from_batch,
 )
-from scripts.train_hierarchy import _noisy_condition
+from scripts.train_hierarchy import _dataset, _noisy_condition
 from fenpix.maskgit import maskgit_loss
 from fenpix.tokenizer import StructureTokenizer, StructureTokenizerConfig
 
@@ -96,6 +97,18 @@ class HierarchyTest(unittest.TestCase):
         self.assertTrue(noisy.ge(0).all())
         self.assertTrue(noisy.lt(8).all())
         self.assertFalse(torch.equal(noisy, tokens))
+
+    def test_training_dataset_excludes_lossy_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _sprite(root / "ok.png", 4, 4)
+            noisy = np.array([[[i * 20, 0, 255 - i * 20, 255] for i in range(9)]], dtype=np.uint8)
+            Image.fromarray(noisy, "RGBA").save(root / "lossy.png")
+
+            args = argparse.Namespace(data=root, max_colors=8, cache=False, stages=[32], limit=None, include_lossy=False)
+            dataset = _dataset(args)
+
+        self.assertEqual(len(dataset), 1)
 
     def test_checkpoint_roundtrip(self):
         model = HierarchicalMaskGIT(HierarchicalMaskGITConfig(vocab_size=8, hidden_dim=16, depth=1, heads=4, text_dim=8, stages=(32, 64)))

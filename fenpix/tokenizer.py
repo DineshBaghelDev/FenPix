@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,30 +25,73 @@ def canonical_structure_indices(
     palette: torch.Tensor,
     valid_mask: torch.Tensor,
     max_regions: int = 64,
+    connected_components: bool = True,
 ) -> torch.Tensor:
-    """Map image-local palette IDs to local region IDs; RGB values are ignored."""
+    """Map visible connected components to local region IDs; RGB values are ignored."""
     if indices.ndim != 3:
         raise ValueError("indices must be [batch,height,width]")
-    out = torch.zeros_like(indices)
+    if not connected_components:
+        out = torch.zeros_like(indices)
+        for b in range(indices.shape[0]):
+            valid = valid_mask[b] & (indices[b] >= 0)
+            if not valid.any():
+                continue
+            alpha = palette[b, :, 3] if palette.ndim == 3 else torch.empty(0, device=indices.device)
+            transparent = torch.zeros_like(valid)
+            in_palette = valid & (indices[b] < len(alpha))
+            if len(alpha):
+                transparent[in_palette] = alpha[indices[b][in_palette]].eq(0)
+            seen: list[int] = []
+            for value in indices[b][valid & ~transparent].flatten().tolist():
+                if value not in seen:
+                    seen.append(value)
+                if len(seen) >= max_regions:
+                    break
+            for region_id, value in enumerate(seen, start=1):
+                out[b][valid & ~transparent & indices[b].eq(value)] = region_id
+        return out.clamp_max(max_regions)
+
+    device = indices.device
+    idx_np = indices.detach().cpu().numpy()
+    palette_np = palette.detach().cpu().numpy()
+    valid_np = valid_mask.detach().cpu().numpy().astype(bool)
+    out_np = np.zeros_like(idx_np, dtype=np.int64)
     for b in range(indices.shape[0]):
-        valid = valid_mask[b] & (indices[b] >= 0)
+        valid = valid_np[b] & (idx_np[b] >= 0)
         if not valid.any():
             continue
-        alpha = palette[b, :, 3] if palette.ndim == 3 else torch.empty(0, device=indices.device)
-        transparent = torch.zeros_like(valid)
-        in_palette = valid & (indices[b] < len(alpha))
+        alpha = palette_np[b, :, 3] if palette_np.ndim == 3 else np.empty(0, dtype=np.uint8)
+        transparent = np.zeros_like(valid)
+        in_palette = valid & (idx_np[b] < len(alpha))
         if len(alpha):
-            transparent[in_palette] = alpha[indices[b][in_palette]].eq(0)
-        visible_values = indices[b][valid & ~transparent]
-        seen: list[int] = []
-        for value in visible_values.flatten().tolist():
-            if value not in seen:
-                seen.append(value)
-            if len(seen) >= max_regions:
+            transparent[in_palette] = alpha[idx_np[b][in_palette]] == 0
+        visible = valid & ~transparent
+        seen = np.zeros_like(valid)
+        region_id = 0
+        height, width = indices.shape[1:]
+        full = False
+        for y in range(height):
+            if full:
                 break
-        for region_id, value in enumerate(seen, start=1):
-            out[b][valid & ~transparent & indices[b].eq(value)] = region_id
-    return out.clamp_max(max_regions)
+            for x in range(width):
+                if not visible[y, x] or seen[y, x]:
+                    continue
+                region_id += 1
+                if region_id > max_regions:
+                    full = True
+                    break
+                value = idx_np[b, y, x]
+                stack = [(y, x)]
+                seen[y, x] = True
+                out_np[b, y, x] = region_id
+                while stack:
+                    cy, cx = stack.pop()
+                    for ny, nx in ((cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)):
+                        if 0 <= ny < height and 0 <= nx < width and visible[ny, nx] and not seen[ny, nx] and idx_np[b, ny, nx] == value:
+                            seen[ny, nx] = True
+                            out_np[b, ny, nx] = region_id
+                            stack.append((ny, nx))
+    return torch.from_numpy(out_np).to(device=device, dtype=indices.dtype).clamp_max(max_regions)
 
 
 def structure_one_hot(targets: torch.Tensor, valid_mask: torch.Tensor, num_classes: int) -> torch.Tensor:
@@ -151,6 +195,8 @@ def tokenizer_metrics(
     mask = valid_mask.bool()
     accuracy = pred[mask].eq(targets[mask]).float().mean().item() if mask.any() else 0.0
     silhouette = pred.eq(0)[mask].eq(targets.eq(0)[mask]).float().mean().item() if mask.any() else 0.0
+    foreground = targets.ne(0)[mask]
+    predicted_foreground = pred.ne(0)[mask]
     counts = torch.bincount(codes.flatten(), minlength=codebook_size).float()
     probs = counts / counts.sum().clamp_min(1)
     used = int((counts > 0).sum().item())
@@ -158,6 +204,8 @@ def tokenizer_metrics(
     return {
         "accuracy": accuracy,
         "silhouette_accuracy": silhouette,
+        "foreground_ratio": float(foreground.float().mean().item()) if foreground.numel() else 0.0,
+        "predicted_foreground_ratio": float(predicted_foreground.float().mean().item()) if predicted_foreground.numel() else 0.0,
         "codes_used": float(used),
         "dead_codes": float(codebook_size - used),
         "perplexity": float(entropy.exp().item()),

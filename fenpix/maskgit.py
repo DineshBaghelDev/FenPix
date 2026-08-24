@@ -67,8 +67,13 @@ def random_mask_tokens(
     return masked, labels
 
 
-def maskgit_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    return F.cross_entropy(logits.permute(0, 2, 3, 1).reshape(-1, logits.shape[1]), labels.reshape(-1), ignore_index=-100)
+def maskgit_loss(logits: torch.Tensor, labels: torch.Tensor, weights: torch.Tensor | None = None) -> torch.Tensor:
+    flat_loss = F.cross_entropy(logits.permute(0, 2, 3, 1).reshape(-1, logits.shape[1]), labels.reshape(-1), ignore_index=-100, reduction="none")
+    if weights is None:
+        active = labels.reshape(-1).ne(-100)
+        return flat_loss.sum() / active.float().sum().clamp_min(1)
+    flat_weights = weights.reshape(-1).masked_fill(labels.reshape(-1).eq(-100), 0.0)
+    return (flat_loss * flat_weights).sum() / flat_weights.sum().clamp_min(1)
 
 
 class MaskGIT(nn.Module):

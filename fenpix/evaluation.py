@@ -31,6 +31,8 @@ class QualityMetrics:
     palette_fidelity: float
     transparency_iou: float
     boundary_f1: float
+    component_count_error: float
+    largest_component_iou: float
     connected_component_consistency: float
     grid_pixel_alignment: float
     text_image_alignment: float
@@ -113,6 +115,45 @@ def _component_count(mask: np.ndarray) -> int:
     return count
 
 
+def _largest_component(mask: np.ndarray) -> np.ndarray:
+    seen = np.zeros_like(mask, dtype=bool)
+    best = []
+    height, width = mask.shape
+    for y in range(height):
+        for x in range(width):
+            if seen[y, x] or not mask[y, x]:
+                continue
+            points = []
+            stack = [(y, x)]
+            seen[y, x] = True
+            while stack:
+                cy, cx = stack.pop()
+                points.append((cy, cx))
+                for ny, nx in ((cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)):
+                    if 0 <= ny < height and 0 <= nx < width and mask[ny, nx] and not seen[ny, nx]:
+                        seen[ny, nx] = True
+                        stack.append((ny, nx))
+            if len(points) > len(best):
+                best = points
+    out = np.zeros_like(mask, dtype=bool)
+    for y, x in best:
+        out[y, x] = True
+    return out
+
+
+def component_count_error(pred_rgba: np.ndarray, target_rgba: np.ndarray) -> float:
+    return float(abs(_component_count(_alpha_mask(pred_rgba)) - _component_count(_alpha_mask(target_rgba))))
+
+
+def largest_component_iou(pred_rgba: np.ndarray, target_rgba: np.ndarray) -> float:
+    pred = _largest_component(_alpha_mask(pred_rgba))
+    target = _largest_component(_alpha_mask(target_rgba))
+    union = np.logical_or(pred, target).sum()
+    if union == 0:
+        return 1.0
+    return float(np.logical_and(pred, target).sum() / union)
+
+
 def connected_component_consistency(pred_rgba: np.ndarray, target_rgba: np.ndarray) -> float:
     pred = _component_count(_alpha_mask(pred_rgba))
     target = _component_count(_alpha_mask(target_rgba))
@@ -150,6 +191,8 @@ def compute_quality_metrics(
         palette_fidelity=float(np.mean([palette_fidelity(p, t) for p, t in zip(pred, target)])),
         transparency_iou=float(np.mean([transparency_iou(p, t) for p, t in zip(pred, target)])),
         boundary_f1=float(np.mean([boundary_f1(p, t) for p, t in zip(pred, target)])),
+        component_count_error=float(np.mean([component_count_error(p, t) for p, t in zip(pred, target)])),
+        largest_component_iou=float(np.mean([largest_component_iou(p, t) for p, t in zip(pred, target)])),
         connected_component_consistency=float(np.mean([connected_component_consistency(p, t) for p, t in zip(pred, target)])),
         grid_pixel_alignment=float(np.mean([grid_pixel_alignment(p) for p in pred])),
         text_image_alignment=text_image_alignment(prompts, [Image.fromarray(p, "RGBA") for p in pred], encoder),

@@ -13,8 +13,8 @@ from torch.utils.data import DataLoader, Subset
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fenpix.dataset import BucketBatchSampler, PixelArtDataset, pixel_art_collate, split_report, train_val_test_split
-from fenpix.hierarchy import HierarchicalMaskGIT, HierarchicalMaskGITConfig, stage_tokens_from_batch
+from fenpix.dataset import BucketBatchSampler, PixelArtDataset, filtered_indices, pixel_art_collate, split_report, train_val_test_split
+from fenpix.hierarchy import HierarchicalMaskGIT, HierarchicalMaskGITConfig, condition_to_shape, stage_structure_from_batch, stage_tokens_from_batch
 from fenpix.text import FrozenPretrainedTextEncoder, TextEmbeddingCache, TextEncoderConfig
 from fenpix.tokenizer import StructureTokenizer
 from fenpix.training import append_jsonl, load_training_checkpoint, save_training_checkpoint, set_deterministic
@@ -31,9 +31,7 @@ def _captions(batch) -> list[str]:
 
 def _dataset(args: argparse.Namespace):
     dataset = PixelArtDataset(args.data, max_colors=args.max_colors, cache=args.cache)
-    keep = [i for i in range(len(dataset)) if int(dataset[i]["bucket_size"]) <= max(args.stages)]
-    if args.limit:
-        keep = keep[: args.limit]
+    keep = filtered_indices(dataset, max_bucket_size=max(args.stages), include_lossy=args.include_lossy, limit=args.limit)
     if not keep:
         raise ValueError("no <=128 PNGs found")
     return Subset(dataset, keep)
@@ -64,10 +62,52 @@ def _noisy_condition(tokens: torch.Tensor, valid: torch.Tensor, vocab_size: int,
     return tokens.masked_scatter(replace, noise[replace]), valid
 
 
+@torch.no_grad()
+def _sample_stage_condition(
+    model: HierarchicalMaskGIT,
+    stage: int,
+    tokens: torch.Tensor,
+    valid: torch.Tensor,
+    text_embeddings: torch.Tensor,
+    lower: tuple[torch.Tensor, torch.Tensor] | None,
+    args: argparse.Namespace,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    stage_model = model.models[str(stage)]
+    cond = condition_to_shape(lower[0], lower[1], tokens.shape[-2:], stage_model.config.pad_token_id) if lower else None
+    sampled = stage_model.sample(
+        tokens.shape,
+        valid,
+        steps=args.sampled_lower_steps,
+        temperature=args.temperature,
+        text_embeddings=text_embeddings,
+        structure_condition=cond,
+        guidance_scale=args.guidance_scale,
+    )
+    return sampled, valid
+
+
+def _mixed_condition(
+    previous_gt: tuple[torch.Tensor, torch.Tensor] | None,
+    previous_sampled: tuple[torch.Tensor, torch.Tensor] | None,
+    args: argparse.Namespace,
+    vocab_size: int,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    if previous_gt is None:
+        return None, None
+    roll = torch.rand(()).item()
+    if previous_sampled is not None and roll < args.sampled_lower_prob:
+        return previous_sampled
+    if roll < args.sampled_lower_prob + args.corrupt_lower_prob:
+        return _noisy_condition(*previous_gt, vocab_size, args.lower_noise_prob)
+    return previous_gt
+
+
 def train(args: argparse.Namespace) -> dict[str, float]:
     set_deterministic(args.seed)
     device = torch.device(args.device)
     tokenizer = StructureTokenizer.load_checkpoint(args.tokenizer, map_location=device).to(device).eval()
+    for param in tokenizer.parameters():
+        param.requires_grad_(False)
     text_encoder = FrozenPretrainedTextEncoder(TextEncoderConfig(dim=args.text_dim, provider=args.text_provider, device=args.device))
     text_cache = TextEmbeddingCache(args.embedding_cache, text_encoder) if args.embedding_cache else None
     dataset = _dataset(args)
@@ -108,13 +148,17 @@ def train(args: argparse.Namespace) -> dict[str, float]:
         model.train()
         opt.zero_grad(set_to_none=True)
         for batch in loader:
+            if steps == 0 or (steps + 1) % 50 == 0:
+                print(f"train epoch {epoch} batch {steps + 1}/{len(loader)}", file=sys.stderr, flush=True)
             texts = _captions(batch)
             text_embeddings = (text_cache.encode(texts) if text_cache else text_encoder.encode(texts)).to(device)
-            tokens = {stage: stage_tokens_from_batch(batch, tokenizer, stage, device) for stage in config.stages}
+            tokens = {stage: stage_tokens_from_batch(batch, tokenizer, stage, device, args.component_targets) for stage in config.stages}
+            structures = {stage: stage_structure_from_batch(batch, stage, config.downsample, device, args.component_targets) for stage in config.stages}
             loss = torch.zeros((), device=device)
-            previous = None
+            previous_gt = None
+            previous_sampled = None
             for stage in config.stages:
-                cond = _noisy_condition(*previous, config.vocab_size, args.lower_noise_prob) if previous else (None, None)
+                cond = _mixed_condition(previous_gt, previous_sampled, args, config.vocab_size)
                 with torch.amp.autocast("cuda", enabled=args.amp and device.type == "cuda"):
                     stage_loss = model.stage_loss(
                         stage,
@@ -123,10 +167,18 @@ def train(args: argparse.Namespace) -> dict[str, float]:
                         text_embeddings,
                         *cond,
                         cond_drop_prob=args.cond_dropout,
+                        target_structure=structures[stage][0],
+                        target_structure_valid=structures[stage][1],
+                        tokenizer=tokenizer,
+                        foreground_weight=args.foreground_weight,
+                        boundary_weight=args.boundary_weight,
+                        foreground_loss_weight=args.foreground_loss_weight,
                     )
                 totals[stage] += float(stage_loss.item())
                 loss = loss + stage_loss
-                previous = tokens[stage]
+                lower_for_sample = previous_sampled or previous_gt
+                previous_sampled = _sample_stage_condition(model, stage, tokens[stage][0], tokens[stage][1], text_embeddings, lower_for_sample, args) if args.sampled_lower_prob > 0 else None
+                previous_gt = tokens[stage]
             scaler.scale(loss / args.grad_accum).backward()
             if (steps + 1) % args.grad_accum == 0:
                 scaler.step(opt)
@@ -141,7 +193,7 @@ def train(args: argparse.Namespace) -> dict[str, float]:
         seconds = perf_counter() - started
         last = {
             "epoch": epoch,
-            "validation_loss": _validation_loss(model, validation_loader, tokenizer, text_encoder, config, args, device),
+            **_validation_loss(model, validation_loader, tokenizer, text_encoder, config, args, device),
             "split": split_report(train_set, validation_set, test_set),
             "seconds": seconds,
             "images_per_second": images / max(seconds, 1e-9),
@@ -159,21 +211,48 @@ def train(args: argparse.Namespace) -> dict[str, float]:
 
 
 @torch.no_grad()
-def _validation_loss(model, loader, tokenizer, text_encoder, config, args, device: torch.device) -> float:
+def _validation_loss(model, loader, tokenizer, text_encoder, config, args, device: torch.device) -> dict[str, float]:
     model.eval()
     total = 0.0
     steps = 0
+    errors = {f"validation_token_error_{a}_{b}": 0.0 for a, b in zip(config.stages, config.stages[1:])}
+    errors |= {f"validation_loss_{a}_{b}": 0.0 for a, b in zip(config.stages, config.stages[1:])}
     for batch in loader:
         text_embeddings = text_encoder.encode(_captions(batch)).to(device)
-        tokens = {stage: stage_tokens_from_batch(batch, tokenizer, stage, device) for stage in config.stages}
+        tokens = {stage: stage_tokens_from_batch(batch, tokenizer, stage, device, args.component_targets) for stage in config.stages}
+        structures = {stage: stage_structure_from_batch(batch, stage, config.downsample, device, args.component_targets) for stage in config.stages}
         loss = torch.zeros((), device=device)
         previous = None
         for stage in config.stages:
-            loss = loss + model.stage_loss(stage, tokens[stage][0], tokens[stage][1], text_embeddings, *(previous or (None, None)))
+            stage_loss = model.stage_loss(
+                stage,
+                tokens[stage][0],
+                tokens[stage][1],
+                text_embeddings,
+                *(previous or (None, None)),
+                target_structure=structures[stage][0],
+                target_structure_valid=structures[stage][1],
+                tokenizer=tokenizer,
+                foreground_weight=args.foreground_weight,
+                boundary_weight=args.boundary_weight,
+                foreground_loss_weight=args.foreground_loss_weight,
+            )
+            loss = loss + stage_loss
+            if previous is not None:
+                stage_model = model.models[str(stage)]
+                cond = condition_to_shape(previous[0], previous[1], tokens[stage][0].shape[-2:], stage_model.config.pad_token_id)
+                masked = torch.full_like(tokens[stage][0], stage_model.config.mask_token_id)
+                pred = stage_model(masked, tokens[stage][1], text_embeddings, cond).argmax(dim=1)
+                valid = tokens[stage][1]
+                errors[f"validation_token_error_{previous_stage}_{stage}"] += float(pred[valid].ne(tokens[stage][0][valid]).float().mean().item() if valid.any() else 0.0)
+                errors[f"validation_loss_{previous_stage}_{stage}"] += float(stage_loss.item())
             previous = tokens[stage]
+            previous_stage = stage
         total += float(loss.item())
         steps += 1
-    return total / max(steps, 1)
+    out = {"validation_loss": total / max(steps, 1)}
+    out.update({key: value / max(steps, 1) for key, value in errors.items()})
+    return out
 
 
 def sample(args: argparse.Namespace) -> None:
@@ -212,6 +291,9 @@ def main() -> None:
     train_parser.add_argument("--validation-fraction", type=float, default=0.2)
     train_parser.add_argument("--test-fraction", type=float, default=0.2)
     train_parser.add_argument("--max-colors", type=int, default=64)
+    train_parser.add_argument("--include-lossy", action="store_true")
+    train_parser.add_argument("--palette-region-targets", dest="component_targets", action="store_false")
+    train_parser.set_defaults(component_targets=True)
     train_parser.add_argument("--hidden-dim", type=int, default=64)
     train_parser.add_argument("--depth", type=int, default=2)
     train_parser.add_argument("--heads", type=int, default=4)
@@ -219,7 +301,13 @@ def main() -> None:
     train_parser.add_argument("--text-provider", choices=["clip", "tiny"], default="clip")
     train_parser.add_argument("--cond-tokens", type=int, default=1)
     train_parser.add_argument("--cond-dropout", type=float, default=0.1)
+    train_parser.add_argument("--sampled-lower-prob", type=float, default=0.25)
+    train_parser.add_argument("--corrupt-lower-prob", type=float, default=0.25)
+    train_parser.add_argument("--sampled-lower-steps", type=int, default=4)
     train_parser.add_argument("--lower-noise-prob", type=float, default=0.15)
+    train_parser.add_argument("--foreground-weight", type=float, default=2.0)
+    train_parser.add_argument("--boundary-weight", type=float, default=2.0)
+    train_parser.add_argument("--foreground-loss-weight", type=float, default=0.25)
     train_parser.add_argument("--embedding-cache", type=Path, default=Path("runs/m6_text_cache.pt"))
     train_parser.add_argument("--lr", type=float, default=3e-4)
     train_parser.add_argument("--stages", type=int, nargs="+", default=[32, 64, 128])
