@@ -1,3 +1,72 @@
+# Provisional Corpus Curation
+
+Date: 2026-08-25
+
+## Goal
+
+Curate the current 42,278 landed PNG candidates without touching raw downloads,
+deleting assets, manually captioning images, or changing the 64-color training
+policy.
+
+## Implemented
+
+- Added `curate_provisional_corpus` in `fenpix/corpus.py`.
+- Added `scripts/curate_corpus.py`.
+- Added focused curation tests in `tests/test_curate_corpus.py`.
+- Reused existing FenPix palette stats, SHA-256 exact dedup, pHash/BK-tree
+  near-dedup, Pillow/NumPy image metadata paths, and installed OpenCV connected
+  components for conservative sprite-sheet detection.
+- Routed accepted assets to `data/fenpix_m8_5_scale/curated_provisional/training_pool`.
+- Routed rejected assets to `data/fenpix_m8_5_scale/curated_provisional/holdout`.
+- Wrote:
+  - `data/fenpix_m8_5_scale/curated_provisional/manifest.provisional.jsonl`
+  - `data/fenpix_m8_5_scale/curated_provisional/holdout_manifest.jsonl`
+  - `data/fenpix_m8_5_scale/curated_provisional/report.provisional.json`
+
+## Curation Result
+
+| bucket | count |
+| --- | ---: |
+| scanned | 42,278 |
+| accepted | 3,974 |
+| holdout | 38,304 |
+| sprite sheets split | 0 |
+| split children | 0 |
+| exact duplicates | 82 |
+| near duplicates | 10,121 |
+| non-pixel-art/smooth | 11,562 |
+| oversized/high-res | 0 |
+| lossy >64 colors | 16,539 |
+| corrupt/unsupported | 0 |
+
+Manifest line counts matched the report exactly:
+
+- `manifest.provisional.jsonl`: 3,974 rows.
+- `holdout_manifest.jsonl`: 38,304 rows.
+
+## Commands Run
+
+```powershell
+python scripts\curate_corpus.py data\fenpix_m8_5_scale\assets data\fenpix_m8_5_scale\curated_provisional --max-size 128 --max-colors 64 --max-pixel-art-colors 256 --near-duplicate-hamming 4
+python -m pytest tests\test_prepare_corpus.py tests\test_palette_pipeline.py tests\test_curate_corpus.py -q
+python -m pytest -q
+```
+
+Results:
+
+- Focused curation/corpus/palette tests: `19 passed`.
+- Full suite: `78 passed`.
+
+## Decision
+
+NO-GO for training from this provisional manifest as-is. The strict curation
+policy leaves only 3,974 accepted samples from 42,278 candidates. Keep the raw
+downloads and holdout pool intact, review rejection stats first, and do not
+relax the 64-color policy until post-curation analysis says which tradeoff is
+worth testing.
+
+---
+
 # M8.7 Context: Direct Structure Generation
 
 Date: 2026-08-24
