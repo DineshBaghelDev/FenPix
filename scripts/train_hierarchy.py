@@ -131,6 +131,7 @@ def train(args: argparse.Namespace) -> dict[str, float]:
         cond_tokens=args.cond_tokens,
         downsample=tokenizer.config.downsample,
         stages=tuple(args.stages),
+        occupancy_stage=args.occupancy_stage,
     )
     model = HierarchicalMaskGIT(config).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -173,6 +174,8 @@ def train(args: argparse.Namespace) -> dict[str, float]:
                         foreground_weight=args.foreground_weight,
                         boundary_weight=args.boundary_weight,
                         foreground_loss_weight=args.foreground_loss_weight,
+                        occupancy_loss_weight=args.occupancy_loss_weight,
+                        occupancy_boundary_weight=args.occupancy_boundary_weight,
                     )
                 totals[stage] += float(stage_loss.item())
                 loss = loss + stage_loss
@@ -236,6 +239,8 @@ def _validation_loss(model, loader, tokenizer, text_encoder, config, args, devic
                 foreground_weight=args.foreground_weight,
                 boundary_weight=args.boundary_weight,
                 foreground_loss_weight=args.foreground_loss_weight,
+                occupancy_loss_weight=args.occupancy_loss_weight,
+                occupancy_boundary_weight=args.occupancy_boundary_weight,
             )
             loss = loss + stage_loss
             if previous is not None:
@@ -271,6 +276,7 @@ def sample(args: argparse.Namespace) -> None:
         steps=args.steps,
         temperature=args.temperature,
         guidance_scale=args.guidance_scale,
+        occupancy_threshold=args.occupancy_threshold,
     )
     _save_stage_grid(samples, args.out, model.config.vocab_size)
 
@@ -308,6 +314,10 @@ def main() -> None:
     train_parser.add_argument("--foreground-weight", type=float, default=2.0)
     train_parser.add_argument("--boundary-weight", type=float, default=2.0)
     train_parser.add_argument("--foreground-loss-weight", type=float, default=0.25)
+    train_parser.add_argument("--occupancy-stage", type=int, default=0)
+    train_parser.add_argument("--occupancy-loss-weight", type=float, default=1.0)
+    train_parser.add_argument("--occupancy-boundary-weight", type=float, default=1.0)
+    train_parser.add_argument("--occupancy-threshold", type=float, default=0.5)
     train_parser.add_argument("--embedding-cache", type=Path, default=Path("runs/m6_text_cache.pt"))
     train_parser.add_argument("--lr", type=float, default=3e-4)
     train_parser.add_argument("--stages", type=int, nargs="+", default=[32, 64, 128])
@@ -336,6 +346,7 @@ def main() -> None:
     sample_parser.add_argument("--steps", type=int, default=8)
     sample_parser.add_argument("--temperature", type=float, default=1.0)
     sample_parser.add_argument("--guidance-scale", type=float, default=2.0)
+    sample_parser.add_argument("--occupancy-threshold", type=float, default=0.5)
     sample_parser.add_argument("--text-provider", choices=["clip", "tiny"], default="clip")
     sample_parser.add_argument("--prompts", nargs="*")
     sample_parser.set_defaults(func=sample)

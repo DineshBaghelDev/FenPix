@@ -25,6 +25,7 @@ class HierarchicalMaskGITConfig:
     cond_tokens: int = 1
     downsample: int = 4
     stages: tuple[int, ...] = STAGE_SIZES
+    occupancy_stage: int = 0
 
 
 def _ceil_multiple(value: int, multiple: int) -> int:
@@ -124,6 +125,73 @@ def foreground_decode_loss(
     return (loss * weights * valid.float()).sum() / (weights * valid.float()).sum().clamp_min(1)
 
 
+def _occupancy_boundary(mask: torch.Tensor) -> torch.Tensor:
+    edge = torch.zeros_like(mask)
+    edge[:, 1:] |= mask[:, 1:] != mask[:, :-1]
+    edge[:, :-1] |= mask[:, 1:] != mask[:, :-1]
+    edge[:, :, 1:] |= mask[:, :, 1:] != mask[:, :, :-1]
+    edge[:, :, :-1] |= mask[:, :, 1:] != mask[:, :, :-1]
+    return edge
+
+
+def _occupancy_soft_boundary(prob: torch.Tensor) -> torch.Tensor:
+    dh = (prob[:, 1:] - prob[:, :-1]).abs()
+    dw = (prob[:, :, 1:] - prob[:, :, :-1]).abs()
+    vertical = torch.maximum(F.pad(dh, (0, 0, 1, 0)), F.pad(dh, (0, 0, 0, 1)))
+    horizontal = torch.maximum(F.pad(dw, (1, 0, 0, 0)), F.pad(dw, (0, 1, 0, 0)))
+    return torch.maximum(vertical, horizontal).clamp(1e-6, 1 - 1e-6)
+
+
+def occupancy_to_token_mask(mask: torch.Tensor, shape: tuple[int, int]) -> torch.Tensor:
+    return F.interpolate(mask[:, None].float(), size=shape, mode="area").squeeze(1).gt(0)
+
+
+def occupancy_loss(logits: torch.Tensor, target: torch.Tensor, valid: torch.Tensor, boundary_weight: float = 1.0) -> torch.Tensor:
+    target = target.float()
+    valid_f = valid.float()
+    bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
+    bce = (bce * valid_f).sum() / valid_f.sum().clamp_min(1)
+    prob = logits.sigmoid()
+    inter = (prob * target * valid_f).sum()
+    dice = 1.0 - (2.0 * inter + 1.0) / ((prob + target) * valid_f).sum().clamp_min(1).add(1.0)
+    pred_boundary = _occupancy_soft_boundary(prob) * valid_f
+    target_boundary = _occupancy_boundary(target.bool() & valid)
+    boundary = F.binary_cross_entropy(pred_boundary, target_boundary.float(), reduction="none")
+    boundary = (boundary * valid_f).sum() / valid_f.sum().clamp_min(1)
+    return bce + dice + boundary * boundary_weight
+
+
+class OccupancyPredictor(nn.Module):
+    def __init__(self, vocab_size: int, hidden_dim: int, text_dim: int = 0):
+        super().__init__()
+        self.pad_token_id = vocab_size + 1
+        self.token_embed = nn.Embedding(vocab_size + 2, hidden_dim)
+        self.text_proj = nn.Linear(text_dim, hidden_dim) if text_dim > 0 else None
+        self.net = nn.Sequential(
+            nn.Conv2d(hidden_dim, hidden_dim, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_dim, hidden_dim, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_dim, 1, 1),
+        )
+
+    def forward(
+        self,
+        lower_tokens: torch.Tensor,
+        lower_valid: torch.Tensor,
+        shape: tuple[int, int],
+        text_embeddings: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        x = lower_tokens.masked_fill(~lower_valid, self.pad_token_id)
+        x = self.token_embed(x).permute(0, 3, 1, 2)
+        x = F.interpolate(x, size=shape, mode="nearest")
+        if self.text_proj is not None:
+            if text_embeddings is None:
+                text_embeddings = torch.zeros((x.shape[0], self.text_proj.in_features), device=x.device)
+            x = x + self.text_proj(text_embeddings.to(x.device))[:, :, None, None]
+        return self.net(x).squeeze(1)
+
+
 class HierarchicalMaskGIT(nn.Module):
     def __init__(self, config: HierarchicalMaskGITConfig | None = None):
         super().__init__()
@@ -144,6 +212,11 @@ class HierarchicalMaskGIT(nn.Module):
                     structure_cond=stage != self.stages[0],
                 )
             )
+        self.occupancy = (
+            OccupancyPredictor(self.config.vocab_size, self.config.hidden_dim, self.config.text_dim)
+            if self.config.occupancy_stage
+            else None
+        )
 
     def stage_loss(
         self,
@@ -160,9 +233,25 @@ class HierarchicalMaskGIT(nn.Module):
         foreground_weight: float = 0.0,
         boundary_weight: float = 0.0,
         foreground_loss_weight: float = 0.0,
+        occupancy_loss_weight: float = 0.0,
+        occupancy_boundary_weight: float = 1.0,
     ) -> torch.Tensor:
         model = self.models[str(stage)]
-        masked, labels = random_mask_tokens(tokens, valid, model.config.mask_token_id)
+        sample_valid = valid
+        loss = torch.zeros((), device=tokens.device)
+        if (
+            self.occupancy is not None
+            and stage == self.config.occupancy_stage
+            and lower_tokens is not None
+            and lower_valid is not None
+            and target_structure is not None
+            and target_structure_valid is not None
+        ):
+            target_occupancy = target_structure.ne(0) & target_structure_valid
+            occ_logits = self.occupancy(lower_tokens, lower_valid, target_structure.shape[-2:], text_embeddings)
+            loss = loss + occupancy_loss(occ_logits, target_occupancy, target_structure_valid, occupancy_boundary_weight) * occupancy_loss_weight
+            sample_valid = valid & occupancy_to_token_mask(target_occupancy, tokens.shape[-2:])
+        masked, labels = random_mask_tokens(tokens, sample_valid, model.config.mask_token_id)
         cond = None
         if lower_tokens is not None and lower_valid is not None:
             cond = condition_to_shape(lower_tokens, lower_valid, tokens.shape[-2:], model.config.pad_token_id)
@@ -172,7 +261,7 @@ class HierarchicalMaskGIT(nn.Module):
         if target_structure is not None and target_structure_valid is not None:
             token_weights = structure_region_weights(target_structure, target_structure_valid, tokens.shape[-2:], foreground_weight, boundary_weight)
             pixel_weights = structure_region_weights(target_structure, target_structure_valid, target_structure.shape[-2:], foreground_weight, boundary_weight)
-        loss = maskgit_loss(logits, labels, token_weights)
+        loss = loss + maskgit_loss(logits, labels, token_weights)
         if foreground_loss_weight > 0 and tokenizer is not None and target_structure is not None and target_structure_valid is not None and pixel_weights is not None:
             loss = loss + foreground_decode_loss(logits, target_structure.clamp_max(tokenizer.config.num_structure_classes - 1), target_structure_valid, tokenizer, pixel_weights) * foreground_loss_weight
         return loss
@@ -187,6 +276,7 @@ class HierarchicalMaskGIT(nn.Module):
         steps: int = 8,
         temperature: float = 1.0,
         guidance_scale: float = 1.0,
+        occupancy_threshold: float = 0.5,
     ) -> dict[int, tuple[torch.Tensor, torch.Tensor]]:
         batch = len(prompts)
         device = next(self.parameters()).device
@@ -198,15 +288,20 @@ class HierarchicalMaskGIT(nn.Module):
             valid = torch.ones(shape, dtype=torch.bool, device=device)
             model = self.models[str(stage)]
             cond = condition_to_shape(previous[0], previous[1], shape[-2:], model.config.pad_token_id) if previous else None
+            sample_valid = valid
+            if self.occupancy is not None and stage == self.config.occupancy_stage and previous is not None:
+                native_mask = self.occupancy(previous[0], previous[1], (native_h, native_w), text_embeddings).sigmoid().ge(occupancy_threshold)
+                sample_valid = valid & occupancy_to_token_mask(native_mask, shape[-2:])
             tokens = model.sample(
                 shape,
-                valid,
+                sample_valid,
                 steps=steps,
                 temperature=temperature,
                 text_embeddings=text_embeddings,
                 structure_condition=cond,
                 guidance_scale=guidance_scale,
             )
+            tokens = tokens.masked_fill(~sample_valid, 0)
             previous = (tokens, valid)
             out[stage] = previous
         return out
@@ -219,6 +314,7 @@ class HierarchicalMaskGIT(nn.Module):
         checkpoint = torch.load(path, map_location=map_location, weights_only=False)
         config = checkpoint["config"]
         config["stages"] = tuple(config["stages"])
+        config.setdefault("occupancy_stage", 0)
         model = cls(HierarchicalMaskGITConfig(**config))
         model.load_state_dict(checkpoint["state_dict"])
         return model

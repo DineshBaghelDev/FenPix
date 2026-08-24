@@ -86,6 +86,32 @@ class HierarchyTest(unittest.TestCase):
         self.assertIsNotNone(model.models["64"].structure_cond_embed.weight.grad)
         self.assertIsNotNone(model.models["64"].head.weight.grad)
 
+    def test_occupancy_stage_adds_gradients(self):
+        model = HierarchicalMaskGIT(HierarchicalMaskGITConfig(vocab_size=8, hidden_dim=16, depth=1, heads=4, text_dim=8, stages=(32, 64), occupancy_stage=64))
+        low = torch.randint(0, 8, (2, 8, 8))
+        high = torch.randint(0, 8, (2, 16, 16))
+        low_valid = torch.ones_like(low, dtype=torch.bool)
+        high_valid = torch.ones_like(high, dtype=torch.bool)
+        structure = torch.zeros((2, 64, 64), dtype=torch.long)
+        structure[:, 16:48, 16:48] = 1
+        structure_valid = torch.ones_like(structure, dtype=torch.bool)
+
+        loss = model.stage_loss(64, high, high_valid, torch.randn(2, 8), low, low_valid, target_structure=structure, target_structure_valid=structure_valid, occupancy_loss_weight=1.0)
+        loss.backward()
+
+        self.assertIsNotNone(model.occupancy.net[-1].weight.grad)
+
+    def test_occupancy_sampling_forces_background_outside_mask(self):
+        model = HierarchicalMaskGIT(HierarchicalMaskGITConfig(vocab_size=8, hidden_dim=16, depth=1, heads=4, text_dim=8, stages=(32, 64), occupancy_stage=64))
+        assert model.occupancy is not None
+        for param in model.occupancy.parameters():
+            param.data.zero_()
+        model.occupancy.net[-1].bias.data.fill_(-10)
+
+        samples = model.sample(64, 64, ["empty"], torch.randn(1, 8), steps=1)
+
+        self.assertTrue(samples[64][0].eq(0).all())
+
     def test_noisy_lower_stage_condition_keeps_shape_and_valid_mask(self):
         torch.manual_seed(0)
         tokens = torch.zeros((1, 4, 4), dtype=torch.long)

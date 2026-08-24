@@ -24,7 +24,7 @@ from .tokenizer import (
     tokenizer_metrics,
 )
 from .maskgit import MaskGIT, MaskGITConfig, maskgit_loss, random_mask_tokens
-from .hierarchy import HierarchicalMaskGIT, HierarchicalMaskGITConfig, condition_to_shape, stage_native_shape, stage_structure_from_batch, stage_tokens_from_batch
+from .hierarchy import HierarchicalMaskGIT, HierarchicalMaskGITConfig, OccupancyPredictor, condition_to_shape, occupancy_loss, occupancy_to_token_mask, stage_native_shape, stage_structure_from_batch, stage_tokens_from_batch
 from .color import IndexedColorConfig, IndexedColorModel, palette_mask_from_sizes, palette_to_uint8, reconstruct_indexed_png
 from .evaluation import PROMPT_EVAL_SET, QualityMetrics, compute_quality_metrics
 from .text import FrozenHashTextEncoder, FrozenPretrainedTextEncoder, FrozenTinyTextEncoder, FrozenVisionLanguageEncoder, TextEmbeddingCache, TextEncoderConfig
@@ -44,6 +44,7 @@ __all__ = [
     "IndexedColorModel",
     "MaskGIT",
     "MaskGITConfig",
+    "OccupancyPredictor",
     "StructureTokenizer",
     "StructureTokenizerConfig",
     "StructureEncoding",
@@ -63,6 +64,8 @@ __all__ = [
     "image_to_indices",
     "load_dataset_manifest",
     "maskgit_loss",
+    "occupancy_loss",
+    "occupancy_to_token_mask",
     "palette_mask_from_sizes",
     "palette_to_uint8",
     "masked_cross_entropy",

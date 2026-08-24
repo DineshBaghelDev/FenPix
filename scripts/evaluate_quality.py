@@ -59,6 +59,7 @@ def main() -> None:
     parser.add_argument("--height", type=int, default=128)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--guidance-scale", type=float, default=2.0)
+    parser.add_argument("--occupancy-threshold", type=float, default=0.5)
     parser.add_argument("--text-provider", choices=["clip", "tiny"], default="clip")
     parser.add_argument("--alignment-provider", choices=["clip", "tiny"], default="clip")
     parser.add_argument("--device", default="cpu")
@@ -97,7 +98,16 @@ def main() -> None:
             if args.use_heldout_structure:
                 tokens, token_valid = stage_tokens_from_batch(batch, tokenizer, min(args.width, args.height), device)  # type: ignore[arg-type]
             else:
-                stages = hierarchy.sample(args.width, args.height, batch_prompts, text, args.structure_steps, args.temperature, args.guidance_scale)
+                stages = hierarchy.sample(
+                    args.width,
+                    args.height,
+                    batch_prompts,
+                    text,
+                    args.structure_steps,
+                    args.temperature,
+                    args.guidance_scale,
+                    args.occupancy_threshold,
+                )
                 tokens, token_valid = stages[max(stages)]
             structure = condition_to_shape(tokens, token_valid, (args.height, args.width), hierarchy.config.vocab_size + 1)
             valid = torch.ones_like(structure, dtype=torch.bool)
