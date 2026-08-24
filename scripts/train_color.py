@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fenpix.color import IndexedColorConfig, IndexedColorModel, reconstruct_indexed_png
 from fenpix.dataset import BucketBatchSampler, PixelArtDataset, filtered_indices, pixel_art_collate, split_report, train_val_test_split
+from fenpix.direct_structure import DirectStructureGenerator
 from fenpix.hierarchy import HierarchicalMaskGIT, condition_to_shape, stage_tokens_from_batch
 from fenpix.text import FrozenPretrainedTextEncoder, TextEmbeddingCache, TextEncoderConfig
 from fenpix.tokenizer import StructureTokenizer
@@ -39,7 +40,11 @@ def _splits(args: argparse.Namespace):
     return train_val_test_split(Subset(dataset, keep), args.validation_fraction, args.test_fraction, args.seed)
 
 
-def _structure_for_batch(batch, tokenizer: StructureTokenizer, stage: int, device: torch.device) -> torch.Tensor:
+def _structure_for_batch(batch, tokenizer: StructureTokenizer | None, stage: int, device: torch.device, direct: bool, vocab_size: int) -> torch.Tensor:
+    if direct:
+        return batch["structure_indices"].to(device).clamp(0, vocab_size - 1)
+    if tokenizer is None:
+        raise ValueError("--tokenizer is required unless --direct-structure-targets is set")
     tokens, token_valid = stage_tokens_from_batch(batch, tokenizer, stage, device)
     return condition_to_shape(tokens, token_valid, batch["indices"].shape[-2:], tokenizer.config.codebook_size + 1)
 
@@ -85,7 +90,9 @@ def _save_viz(structure: torch.Tensor, valid: torch.Tensor, sample: dict[str, to
 def train(args: argparse.Namespace) -> dict[str, float]:
     set_deterministic(args.seed)
     device = torch.device(args.device)
-    tokenizer = StructureTokenizer.load_checkpoint(args.tokenizer, map_location=device).to(device).eval()
+    if not args.direct_structure_targets and args.tokenizer is None:
+        raise ValueError("--tokenizer is required unless --direct-structure-targets is set")
+    tokenizer = None if args.direct_structure_targets else StructureTokenizer.load_checkpoint(args.tokenizer, map_location=device).to(device).eval()
     text_encoder = FrozenPretrainedTextEncoder(TextEncoderConfig(dim=args.text_dim, provider=args.text_provider, device=args.device))
     text_cache = TextEmbeddingCache(args.embedding_cache, text_encoder) if args.embedding_cache else None
     train_set, validation_set, test_set = _splits(args)
@@ -94,7 +101,7 @@ def train(args: argparse.Namespace) -> dict[str, float]:
     config = IndexedColorConfig(
         max_colors=args.max_colors,
         min_colors=args.min_colors,
-        structure_vocab_size=tokenizer.config.codebook_size,
+        structure_vocab_size=args.structure_vocab_size if args.direct_structure_targets else tokenizer.config.codebook_size,
         hidden_dim=args.hidden_dim,
         depth=args.depth,
         heads=args.heads,
@@ -121,7 +128,7 @@ def train(args: argparse.Namespace) -> dict[str, float]:
         for batch in loader:
             texts = _captions(batch)
             text = (text_cache.encode(texts) if text_cache else text_encoder.encode(texts)).to(device)
-            structure = _structure_for_batch(batch, tokenizer, min(args.stage, args.max_size), device)
+            structure = _structure_for_batch(batch, tokenizer, min(args.stage, args.max_size), device, args.direct_structure_targets, config.structure_vocab_size)
             with torch.amp.autocast("cuda", enabled=args.amp and device.type == "cuda"):
                 losses = model.loss(
                     batch["indices"].to(device),
@@ -164,7 +171,7 @@ def train(args: argparse.Namespace) -> dict[str, float]:
     if args.viz:
         batch = next(iter(loader))
         text = text_encoder.encode(_captions(batch)).to(device)
-        structure = _structure_for_batch(batch, tokenizer, min(args.stage, args.max_size), device)
+        structure = _structure_for_batch(batch, tokenizer, min(args.stage, args.max_size), device, args.direct_structure_targets, config.structure_vocab_size)
         sample = model.eval().sample(structure, batch["valid_mask"].to(device), text, args.steps, args.temperature, args.guidance_scale)
         _save_viz(structure.cpu(), batch["valid_mask"], sample, args.viz)
     return last
@@ -177,7 +184,7 @@ def _validation_loss(model, loader, tokenizer, text_encoder, args, device: torch
     steps = 0
     for batch in loader:
         text = text_encoder.encode(_captions(batch)).to(device)
-        structure = _structure_for_batch(batch, tokenizer, min(args.stage, args.max_size), device)
+        structure = _structure_for_batch(batch, tokenizer, min(args.stage, args.max_size), device, args.direct_structure_targets, model.config.structure_vocab_size)
         losses = model.loss(
             batch["indices"].to(device),
             batch["valid_mask"].to(device),
@@ -200,9 +207,15 @@ def sample(args: argparse.Namespace) -> None:
     prompts = (prompts * ((args.samples + len(prompts) - 1) // len(prompts)))[: args.samples]
     text = FrozenPretrainedTextEncoder(TextEncoderConfig(dim=color.config.text_dim, provider=args.text_provider, device=args.device)).encode(prompts).to(device) if color.config.text_dim else None
 
-    if args.hierarchy:
+    if args.direct_structure:
+        direct = DirectStructureGenerator.load_checkpoint(args.direct_structure, map_location=device).to(device).eval()
+        structure_text = FrozenPretrainedTextEncoder(TextEncoderConfig(dim=direct.config.text_dim, provider=args.text_provider, device=args.device)).encode(prompts).to(device) if direct.config.text_dim else None
+        valid = torch.ones((args.samples, args.height, args.width), dtype=torch.bool, device=device)
+        structure = direct.sample(valid.shape, valid, structure_text, args.structure_steps, args.temperature, args.guidance_scale)
+    elif args.hierarchy:
         hierarchy = HierarchicalMaskGIT.load_checkpoint(args.hierarchy, map_location=device).to(device).eval()
-        stages = hierarchy.sample(args.width, args.height, prompts, text, args.structure_steps, args.temperature, args.guidance_scale)
+        structure_text = FrozenPretrainedTextEncoder(TextEncoderConfig(dim=hierarchy.config.text_dim, provider=args.text_provider, device=args.device)).encode(prompts).to(device) if hierarchy.config.text_dim else None
+        stages = hierarchy.sample(args.width, args.height, prompts, structure_text, args.structure_steps, args.temperature, args.guidance_scale)
         tokens, valid = stages[max(stages)]
         structure = condition_to_shape(tokens, valid, (args.height, args.width), hierarchy.config.vocab_size + 1)
     else:
@@ -223,7 +236,8 @@ def main() -> None:
 
     train_parser = sub.add_parser("train")
     train_parser.add_argument("data", type=Path)
-    train_parser.add_argument("--tokenizer", type=Path, required=True)
+    train_parser.add_argument("--tokenizer", type=Path)
+    train_parser.add_argument("--direct-structure-targets", action="store_true")
     train_parser.add_argument("--checkpoint", type=Path, default=Path("runs/m7_color.pt"))
     train_parser.add_argument("--viz", type=Path, default=Path("runs/m7_color_viz.png"))
     train_parser.add_argument("--device", default="cpu")
@@ -236,6 +250,7 @@ def main() -> None:
     train_parser.add_argument("--max-colors", type=int, default=64)
     train_parser.add_argument("--min-colors", type=int, default=8)
     train_parser.add_argument("--max-size", type=int, default=128)
+    train_parser.add_argument("--structure-vocab-size", type=int, default=128)
     train_parser.add_argument("--stage", type=int, default=128)
     train_parser.add_argument("--hidden-dim", type=int, default=64)
     train_parser.add_argument("--depth", type=int, default=2)
@@ -260,6 +275,7 @@ def main() -> None:
     sample_parser = sub.add_parser("sample")
     sample_parser.add_argument("--checkpoint", type=Path, required=True)
     sample_parser.add_argument("--hierarchy", type=Path)
+    sample_parser.add_argument("--direct-structure", type=Path)
     sample_parser.add_argument("--out", type=Path, default=Path("runs/m7_sample.png"))
     sample_parser.add_argument("--viz", type=Path, default=Path("runs/m7_sample_viz.png"))
     sample_parser.add_argument("--device", default="cpu")

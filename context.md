@@ -1,3 +1,148 @@
+# M8.7 Context: Direct Structure Generation
+
+Date: 2026-08-24
+
+## Goal
+
+Replace the 32->64->128 generated structure hierarchy with a direct target-resolution
+structure generator, avoiding hierarchy exposure bias while preserving FenPix's
+discrete/palette-compatible color contract.
+
+Chosen architecture:
+
+text + valid native canvas -> direct masked conv structure generator -> discrete
+canonical structure map -> color stage
+
+## Implemented
+
+- Added `fenpix/direct_structure.py`.
+- Added `DirectStructureGenerator` with:
+  - discrete structure token embeddings
+  - row/column positional embeddings
+  - small dilated convolutional residual blocks
+  - masked structure-token head
+  - auxiliary occupancy, boundary, and component-count heads
+- Structure representation stays simple:
+  - `0` = transparent/background
+  - `1..N` = canonical connected foreground regions from `pixel_art_collate`
+  - `vocab_size` = mask
+  - `vocab_size + 1` = pad
+- Added `scripts/train_direct_structure.py` for direct structure train/sample.
+- Added `--direct-structure` to `scripts/evaluate_quality.py`.
+- Added `--direct-structure-targets` and `--direct-structure` sampling support to
+  `scripts/train_color.py`, so color can be retrained fairly against direct
+  canonical structure maps.
+- Exported `DirectStructureConfig` and `DirectStructureGenerator` from
+  `fenpix/__init__.py`.
+- Added tests in `tests/test_direct_structure.py`.
+
+## Losses
+
+- Masked structure CE with foreground/boundary weighting.
+- Occupancy BCE auxiliary loss.
+- Boundary BCE auxiliary loss.
+- Component-count CE auxiliary loss.
+- No hard occupancy gate in sampling; M8.6 showed hard occupancy greatly reduced
+  fragmentation but damaged silhouette/boundary quality.
+
+Default small-model shape:
+
+- `hidden_dim=96`
+- `depth=8`
+- `text_dim=64`
+- `structure_vocab_size=128`
+- max native canvas `128x128`
+
+## Commands Run
+
+Focused tests:
+
+```powershell
+python -m pytest tests\test_direct_structure.py -q
+python -m pytest tests\test_hierarchy.py tests\test_color.py tests\test_direct_structure.py -q
+```
+
+Full tests:
+
+```powershell
+python -m pytest -q
+```
+
+Result: `75 passed`.
+
+Tiny direct-structure training smoke:
+
+```powershell
+python scripts\train_direct_structure.py train data\processed_m8_2 --checkpoint runs\m8_7_direct_smoke.pt --log runs\m8_7_direct_smoke.jsonl --viz runs\m8_7_direct_smoke.png --device cpu --epochs 1 --batch-size 2 --limit 8 --max-size 64 --hidden-dim 16 --depth 1 --text-dim 8 --text-provider tiny --embedding-cache runs\m8_7_direct_smoke_text_cache.pt --samples 2 --width 32 --height 32 --steps 1
+```
+
+Result:
+
+- `validation_loss`: 5.626181602478027
+- `validation_token_error`: 0.99755859375
+- smoke only; not a quality result
+
+Tiny end-to-end direct-structure eval smoke:
+
+```powershell
+python scripts\evaluate_quality.py data\processed_m8_2 --color-checkpoint runs\m8_3_64_color.pt --direct-structure runs\m8_7_direct_smoke.pt --metrics runs\m8_7_direct_smoke_metrics.json --gallery runs\m8_7_direct_smoke_gallery.png --device cpu --limit 2 --max-size 64 --width 32 --height 32 --batch-size 1 --steps 1 --structure-steps 1 --text-provider tiny --alignment-provider tiny --split validation
+```
+
+Result:
+
+- completed end to end with `structure_source=direct`
+- smoke only; old M3-conditioned color checkpoint is not a fair quality pairing
+
+Tiny direct-structure color-target training smoke:
+
+```powershell
+python scripts\train_color.py train data\processed_m8_2 --direct-structure-targets --checkpoint runs\m8_7_direct_color_smoke.pt --log runs\m8_7_direct_color_smoke.jsonl --viz runs\m8_7_direct_color_smoke.png --device cpu --epochs 1 --batch-size 2 --limit 8 --max-size 64 --hidden-dim 16 --depth 1 --text-dim 8 --text-provider tiny --embedding-cache runs\m8_7_direct_color_smoke_text_cache.pt --steps 1
+```
+
+Result:
+
+- `validation_loss`: 6.482417106628418
+- smoke only; proves color can train on direct structure targets
+
+## Decision
+
+M8.7 is implemented as an architecture path and smoke-proven, not quality-proven.
+
+Next quality gate:
+
+1. Train direct structure at 64px on the existing 5k lossless slice.
+2. Train color with `--direct-structure-targets` on the same slice.
+3. Evaluate validation quality with `--direct-structure`.
+4. Keep only if it beats M8.5 transparency IoU `0.2369` and boundary F1
+   `0.1439`, while keeping component count error far below M8.5 `31.653`.
+
+## Working Tree
+
+M8.7 source files:
+
+- `fenpix/direct_structure.py`
+- `scripts/train_direct_structure.py`
+- `tests/test_direct_structure.py`
+- `fenpix/__init__.py`
+- `scripts/evaluate_quality.py`
+- `scripts/train_color.py`
+- `context.md`
+
+Generated M8.7 smoke artifacts:
+
+- `runs/m8_7_direct_smoke.pt`
+- `runs/m8_7_direct_smoke.jsonl`
+- `runs/m8_7_direct_smoke.png`
+- `runs/m8_7_direct_smoke_metrics.json`
+- `runs/m8_7_direct_smoke_gallery.png`
+- `runs/m8_7_direct_smoke_text_cache.pt`
+- `runs/m8_7_direct_color_smoke.pt`
+- `runs/m8_7_direct_color_smoke.jsonl`
+- `runs/m8_7_direct_color_smoke.png`
+- `runs/m8_7_direct_color_smoke_text_cache.pt`
+
+---
+
 # M8.6 Context: Explicit Silhouette/Occupancy Generation
 
 Date: 2026-08-24
@@ -116,4 +261,3 @@ Generated M8.6 artifacts:
 - `runs/m8_6_occ_64_validation_gallery.png`
 - `runs/m8_6_occ_t025_64_validation_metrics.json`
 - `runs/m8_6_occ_t025_64_validation_gallery.png`
-

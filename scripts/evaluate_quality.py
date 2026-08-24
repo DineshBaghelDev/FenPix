@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fenpix.color import IndexedColorModel
 from fenpix.dataset import BucketBatchSampler, PixelArtDataset, filtered_indices, pixel_art_collate, split_report, train_val_test_split
+from fenpix.direct_structure import DirectStructureGenerator
 from fenpix.evaluation import compute_quality_metrics, render_indexed_batch, save_comparison_gallery, save_metrics, timed
 from fenpix.hierarchy import HierarchicalMaskGIT, condition_to_shape, stage_tokens_from_batch
 from fenpix.text import FrozenPretrainedTextEncoder, FrozenVisionLanguageEncoder, TextEncoderConfig
@@ -41,7 +42,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("data", type=Path)
     parser.add_argument("--color-checkpoint", type=Path, required=True)
-    parser.add_argument("--hierarchy", type=Path, required=True)
+    parser.add_argument("--hierarchy", type=Path)
+    parser.add_argument("--direct-structure", type=Path)
     parser.add_argument("--tokenizer", type=Path)
     parser.add_argument("--use-heldout-structure", action="store_true")
     parser.add_argument("--metrics", type=Path, default=Path("runs/m8_1_metrics.json"))
@@ -75,11 +77,20 @@ def main() -> None:
     loader = DataLoader(eval_set, batch_sampler=BucketBatchSampler(eval_set, args.batch_size, seed=args.seed), collate_fn=pixel_art_collate)
     print(f"eval batches={len(loader)}", file=sys.stderr, flush=True)
     color = IndexedColorModel.load_checkpoint(args.color_checkpoint, map_location=device).to(device).eval()
-    hierarchy = HierarchicalMaskGIT.load_checkpoint(args.hierarchy, map_location=device).to(device).eval()
+    if not args.hierarchy and not args.direct_structure and not args.use_heldout_structure:
+        raise ValueError("provide --hierarchy, --direct-structure, or --use-heldout-structure")
+    hierarchy = HierarchicalMaskGIT.load_checkpoint(args.hierarchy, map_location=device).to(device).eval() if args.hierarchy else None
+    direct = DirectStructureGenerator.load_checkpoint(args.direct_structure, map_location=device).to(device).eval() if args.direct_structure else None
     tokenizer = StructureTokenizer.load_checkpoint(args.tokenizer, map_location=device).to(device).eval() if args.tokenizer else None
     if args.use_heldout_structure and tokenizer is None:
         raise ValueError("--use-heldout-structure requires --tokenizer")
     text_encoder = FrozenPretrainedTextEncoder(TextEncoderConfig(dim=color.config.text_dim, provider=args.text_provider, device=args.device))
+    structure_text_dim = direct.config.text_dim if direct is not None else hierarchy.config.text_dim if hierarchy is not None else color.config.text_dim
+    structure_text_encoder = (
+        text_encoder
+        if structure_text_dim == color.config.text_dim
+        else FrozenPretrainedTextEncoder(TextEncoderConfig(dim=structure_text_dim, provider=args.text_provider, device=args.device))
+    )
     vlm = FrozenVisionLanguageEncoder(TextEncoderConfig(provider=args.alignment_provider, device=args.device))
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
@@ -93,23 +104,29 @@ def main() -> None:
             print(f"eval batch {step}/{len(loader)}", file=sys.stderr, flush=True)
         batch_prompts = _captions(batch)
         text = text_encoder.encode(batch_prompts).to(device)
+        structure_text = structure_text_encoder.encode(batch_prompts).to(device)
 
         def generate():
             if args.use_heldout_structure:
                 tokens, token_valid = stage_tokens_from_batch(batch, tokenizer, min(args.width, args.height), device)  # type: ignore[arg-type]
+                structure = condition_to_shape(tokens, token_valid, (args.height, args.width), tokenizer.config.codebook_size + 1)  # type: ignore[union-attr]
+            elif direct is not None:
+                valid = torch.ones((len(batch_prompts), args.height, args.width), dtype=torch.bool, device=device)
+                structure = direct.sample(valid.shape, valid, structure_text, args.structure_steps, args.temperature, args.guidance_scale)
             else:
+                assert hierarchy is not None
                 stages = hierarchy.sample(
                     args.width,
                     args.height,
                     batch_prompts,
-                    text,
+                    structure_text,
                     args.structure_steps,
                     args.temperature,
                     args.guidance_scale,
                     args.occupancy_threshold,
                 )
                 tokens, token_valid = stages[max(stages)]
-            structure = condition_to_shape(tokens, token_valid, (args.height, args.width), hierarchy.config.vocab_size + 1)
+                structure = condition_to_shape(tokens, token_valid, (args.height, args.width), hierarchy.config.vocab_size + 1)
             valid = torch.ones_like(structure, dtype=torch.bool)
             return color.sample(structure, valid, text, args.steps, args.temperature, args.guidance_scale) | {"valid_mask": valid}
 
@@ -127,6 +144,7 @@ def main() -> None:
         "generation": {
             "width": args.width,
             "height": args.height,
+            "structure_source": "heldout" if args.use_heldout_structure else "direct" if args.direct_structure else "hierarchy",
             "used_heldout_structure": args.use_heldout_structure,
             "samples_per_second": 1000.0 * len(generated) / max(total_latency, 1e-9),
             "vram_peak_mb": torch.cuda.max_memory_allocated(device) / 1024 / 1024 if device.type == "cuda" else 0.0,
