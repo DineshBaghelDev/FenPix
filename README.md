@@ -126,6 +126,36 @@ The processed directory must be empty. It mirrors the input folder or zip paths,
 copies accepted PNG files unchanged, writes matching `.json` sidecars, and
 writes `report.json`.
 
+## Prepare A Multi-Source Corpus
+
+```bash
+python scripts/prepare_corpus.py data/corpus_sources.json data/fenpix_m8_5_scale --target-count 100000 --min-count 50000 --compose-scenes 10000
+```
+
+The corpus script accepts local folders, zip archives, single PNGs, and URLs.
+Each source must declare a permissive license and provenance. It copies accepted
+native PNGs into `assets/`, writes sidecar metadata, rejects unclear/NC/ND
+licenses, filters oversized/non-pixel-art/lossy rows, removes exact and near
+duplicates, balances by category and bucket, then writes `manifest.jsonl` and
+`report.json`.
+
+Example config:
+
+```json
+{
+  "sources": [
+    {
+      "name": "Kenney Tiny Town",
+      "path": "data/raw/kenney_tiny_town.zip",
+      "license": "Creative Commons CC0",
+      "source_url": "https://kenney.nl/assets/tiny-town",
+      "category": "tile",
+      "tags": ["kenney", "tile"]
+    }
+  ]
+}
+```
+
 ## Quality Baseline
 
 ```bash

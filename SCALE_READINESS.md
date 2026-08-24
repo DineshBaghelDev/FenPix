@@ -16,9 +16,13 @@ Decision metric: prompt-only held-out quality first, then latency/VRAM.
 
 ## Scale Gates
 
+- Build the 50k-100k M8.5 freeze corpus with `scripts/prepare_corpus.py` from
+  multi-source licensed inputs before training. Required source metadata:
+  `name`, `path` or `url`, `license`, `source_url`, `category`, and useful tags.
 - Build `manifest.parquet` when `pyarrow` is installed, or `manifest.jsonl` as the dependency-free fallback.
 - Keep original PNGs at native resolution; train with bucketed 32/64/128 batches.
 - Exclude or segregate `lossy=True` rows unless explicitly testing lossy data.
+- Treat `report.status=below_min_count` as a corpus blocker, not a training-ready dataset.
 - Run `scripts/benchmark_scale.py` before long training to capture loader throughput, peak VRAM, and 500k/1M epoch estimates.
 - Resume only from checkpoints saved by the training scripts; they include model, optimizer, epoch, metrics, and RNG state.
 

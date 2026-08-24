@@ -26,6 +26,7 @@ from .tokenizer import (
 from .maskgit import MaskGIT, MaskGITConfig, maskgit_loss, random_mask_tokens
 from .hierarchy import HierarchicalMaskGIT, HierarchicalMaskGITConfig, OccupancyPredictor, condition_to_shape, occupancy_loss, occupancy_to_token_mask, stage_native_shape, stage_structure_from_batch, stage_tokens_from_batch
 from .color import IndexedColorConfig, IndexedColorModel, palette_mask_from_sizes, palette_to_uint8, reconstruct_indexed_png
+from .corpus import prepare_corpus
 from .direct_structure import DirectStructureConfig, DirectStructureGenerator
 from .evaluation import PROMPT_EVAL_SET, QualityMetrics, compute_quality_metrics
 from .text import FrozenHashTextEncoder, FrozenPretrainedTextEncoder, FrozenTinyTextEncoder, FrozenVisionLanguageEncoder, TextEmbeddingCache, TextEncoderConfig
@@ -45,6 +46,7 @@ __all__ = [
     "HierarchicalMaskGITConfig",
     "IndexedColorConfig",
     "IndexedColorModel",
+    "prepare_corpus",
     "MaskGIT",
     "MaskGITConfig",
     "OccupancyPredictor",
