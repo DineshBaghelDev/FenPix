@@ -1,0 +1,45 @@
+{
+  "sources": [
+    {
+      "name": "Kenney Existing M8.2 Corpus",
+      "path": "data/processed_m8_2",
+      "license": "Creative Commons CC0",
+      "source_url": "https://kenney.nl/assets",
+      "category": "mixed",
+      "tags": ["kenney", "game-assets", "pixel-art"]
+    },
+    {
+      "name": "OpenGameArt CC0 2D Art",
+      "hf_repo": "nyuuzyou/OpenGameArt-CC0",
+      "license": "CC0-1.0",
+      "source_url": "https://huggingface.co/datasets/nyuuzyou/OpenGameArt-CC0",
+      "category": "mixed",
+      "tags": ["opengameart", "cc0", "2d-art", "pixel-art"],
+      "allow_patterns": ["README.md", "ATTRIBUTION.md", "archive_index.csv", "2D_Art_*.zip"],
+      "extract_archives": true
+    },
+    {
+      "name": "Sc077y Pixel Art Synthetic 10k",
+      "hf_repo": "Sc077y/pixel-art-synthetic-10k",
+      "license": "MIT",
+      "source_url": "https://huggingface.co/datasets/Sc077y/pixel-art-synthetic-10k",
+      "category": "synthetic",
+      "tags": ["huggingface", "synthetic", "pixel-art"],
+      "allow_patterns": ["README.md", "palette.npy", "data/*.parquet"],
+      "extract_parquet": true,
+      "extract_grid": true
+    },
+    {
+      "name": "DiffusionDB Pixelart",
+      "enabled": false,
+      "blocked_reason": "Attempted HF snapshot stalled with only cache control files downloaded and no image zips/extracted PNGs; previous eligible count under 128px/lossless gates was 0.",
+      "hf_repo": "jainr3/diffusiondb-pixelart",
+      "license": "CC0-1.0",
+      "source_url": "https://huggingface.co/datasets/jainr3/diffusiondb-pixelart",
+      "category": "synthetic",
+      "tags": ["huggingface", "diffusiondb", "pixel-art"],
+      "allow_patterns": ["README.md", "metadata.parquet", "images/*.zip"],
+      "extract_archives": true
+    }
+  ]
+}

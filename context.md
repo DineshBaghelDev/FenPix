@@ -298,3 +298,67 @@ Generated M8.6 artifacts:
 - `runs/m8_6_occ_64_validation_gallery.png`
 - `runs/m8_6_occ_t025_64_validation_metrics.json`
 - `runs/m8_6_occ_t025_64_validation_gallery.png`
+
+---
+
+# M8.5 Freeze Corpus Acquisition Attempt
+
+Date: 2026-08-24
+
+## Goal
+
+Freeze architecture at M8.5 and determine whether failures are data/training-limited before adding architecture variants.
+
+Target corpus: 50k-100k usable lossless samples from licensed multi-source inputs, scalable toward 500k-1M.
+
+## Implemented
+
+- Reusable multi-source corpus ingestion in `fenpix/corpus.py`.
+- Hugging Face dataset snapshot support via `hf_repo` sources.
+- Zip extraction for archive-backed sources.
+- Parquet image extraction, including Sc077y `grid` + `palette.npy` reconstruction.
+- License allow/deny filtering and source provenance sidecars.
+- Resumable archive/parquet extraction and procedural scene composition.
+- Manifest usability fix: final manifests are written both at corpus root and under `assets/`.
+- Faster manifest duplicate indexing and cheap manifest palette stats in `fenpix/dataset.py`.
+- Real config at `data/corpus_sources_m8_5.json`.
+
+## Sources Attempted
+
+| source | license | status | raw accepted PNGs |
+| --- | --- | --- | ---: |
+| Kenney Existing M8.2 Corpus | Creative Commons CC0 | acquired from local processed corpus | 9,566 |
+| OpenGameArt CC0 2D Art | CC0-1.0 | acquired from HF mirror, many oversized/non-pixel-art rejects | 2,860 |
+| Sc077y Pixel Art Synthetic 10k | MIT | acquired and reconstructed from parquet grid + palette | 9,852 |
+| DiffusionDB Pixelart | CC0-1.0 | blocked; HF snapshot stalled with only cache/control files and no image zips | 0 |
+| Procedural compositions | mixed permissive from acquired parents | generated/reused | 20,000 |
+
+Raw landed corpus under `data/fenpix_m8_5_scale/assets`: 42,278 PNGs.
+
+## Commands Run
+
+```powershell
+python scripts\prepare_corpus.py data\corpus_sources_m8_5.json data\fenpix_m8_5_scale --target-count 100000 --min-count 50000 --compose-scenes 20000 --seed 0 --max-size 128 --max-colors 64 --max-pixel-art-colors 256
+```
+
+Finalization attempts were stopped because the raw acquired corpus was only 42,278 PNGs before curation/dedup, below the required 50k floor even in the impossible best case where every row survived.
+
+Focused verification:
+
+```powershell
+python -m pytest tests\test_prepare_corpus.py tests\test_palette_pipeline.py -q
+```
+
+Result: `18 passed`.
+
+## Decision
+
+NO-GO for retraining from this corpus.
+
+Do not claim the scale corpus is ready. Current blockers are source/count blockers, not architecture evidence:
+
+- The raw corpus is below 50k before curation.
+- DiffusionDB Pixelart did not download usable image zips in this run.
+- OpenGameArt CC0 2D Art yielded only 2,860 usable <=128px PNGs after filters.
+- Sc077y contributes 9,852 reconstructable MIT PNGs, but many are expected to be lossy under the current <=64 color training contract.
+- No final manifest/report was produced for a training-ready corpus.

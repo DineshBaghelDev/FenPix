@@ -180,6 +180,64 @@ def _hamming(a: str, b: str) -> int:
     return sum(x != y for x, y in zip(a, b))
 
 
+def _phash_int(phash: str) -> int:
+    return int(phash, 2)
+
+
+def _hamming_int(a: int, b: int) -> int:
+    return (a ^ b).bit_count()
+
+
+def _palette_manifest_stats(image: Image.Image, *, max_colors: int) -> tuple[int, int, bool]:
+    rgba = np.asarray(image.convert("RGBA"), dtype=np.uint8).copy()
+    rgba[rgba[..., 3] == 0, :3] = 0
+    unique = np.unique(rgba.reshape(-1, 4), axis=0)
+    unique_count = len(unique)
+    if unique_count > max_colors:
+        return unique_count, max_colors, True
+    return unique_count, unique_count, False
+
+
+class _PhashIndex:
+    def __init__(self) -> None:
+        self.exact: dict[int, str] = {}
+        self.root: tuple[int, str, dict[int, Any]] | None = None
+
+    def find(self, phash: str, *, max_hamming: int) -> str | None:
+        value = _phash_int(phash)
+        if value in self.exact:
+            return self.exact[value]
+        return self._find_node(self.root, value, max_hamming)
+
+    def add(self, phash: str, path: str) -> None:
+        value = _phash_int(phash)
+        self.exact.setdefault(value, path)
+        node = self.root
+        if node is None:
+            self.root = (value, path, {})
+            return
+        while True:
+            distance = _hamming_int(value, node[0])
+            children = node[2]
+            if distance not in children:
+                children[distance] = (value, path, {})
+                return
+            node = children[distance]
+
+    def _find_node(self, node: tuple[int, str, dict[int, Any]] | None, value: int, max_hamming: int) -> str | None:
+        if node is None:
+            return None
+        distance = _hamming_int(value, node[0])
+        if distance <= max_hamming:
+            return node[1]
+        for edge, child in node[2].items():
+            if distance - max_hamming <= edge <= distance + max_hamming:
+                found = self._find_node(child, value, max_hamming)
+                if found is not None:
+                    return found
+        return None
+
+
 def build_dataset_manifest(
     root: str | Path,
     manifest_path: str | Path,
@@ -193,7 +251,7 @@ def build_dataset_manifest(
     rows: list[dict[str, Any]] = []
     rejected: dict[str, int] = {}
     seen_bytes: dict[str, str] = {}
-    seen_phash: dict[str, str] = {}
+    seen_phash = _PhashIndex()
 
     for path in sorted(root.rglob("*.png")):
         if any(part.startswith(".") for part in path.relative_to(root).parts):
@@ -201,9 +259,9 @@ def build_dataset_manifest(
         try:
             with Image.open(path) as image:
                 image.load()
-                encoding = image_to_indices(image, max_colors=max_colors)
-                width, height = encoding.width, encoding.height
+                width, height = image.size
                 phash = _perceptual_hash(image)
+                unique_color_count, palette_size, lossy = _palette_manifest_stats(image, max_colors=max_colors)
         except Exception as exc:
             rejected[type(exc).__name__] = rejected.get(type(exc).__name__, 0) + 1
             continue
@@ -211,7 +269,7 @@ def build_dataset_manifest(
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         metadata_path = path.with_suffix(".json")
         metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
-        near_of = next((other for other_hash, other in seen_phash.items() if _hamming(phash, other_hash) <= near_duplicate_hamming), None)
+        near_of = seen_phash.find(phash, max_hamming=near_duplicate_hamming)
         row = {
             "path": str(path),
             "rel_path": str(path.relative_to(root)).replace("\\", "/"),
@@ -224,17 +282,17 @@ def build_dataset_manifest(
             "phash": phash,
             "duplicate_of": seen_bytes.get(digest),
             "near_duplicate_of": near_of,
-            "lossy": encoding.lossy,
-            "unique_color_count": encoding.unique_color_count,
-            "palette_size": len(encoding.palette),
             "source": metadata.get("source"),
             "source_url": metadata.get("source_url"),
             "license": metadata.get("license"),
             "metadata": metadata,
+            "lossy": lossy,
+            "unique_color_count": unique_color_count,
+            "palette_size": palette_size,
         }
         rows.append(row)
         seen_bytes.setdefault(digest, str(path))
-        seen_phash.setdefault(phash, str(path))
+        seen_phash.add(phash, str(path))
 
     save_dataset_manifest(rows, manifest_path)
     return dataset_manifest_report(rows) | {"rejected": rejected, "manifest": str(manifest_path)}
@@ -429,7 +487,7 @@ def quality_score(sample: dict[str, Any]) -> float:
 
 def dataset_quality_report(dataset: Dataset) -> dict[str, Any]:
     seen: dict[str, str] = {}
-    seen_phash: dict[str, str] = {}
+    seen_phash = _PhashIndex()
     duplicates: list[dict[str, str]] = []
     near_duplicates: list[dict[str, str]] = []
     scores: list[float] = []
@@ -443,10 +501,10 @@ def dataset_quality_report(dataset: Dataset) -> dict[str, Any]:
             seen[digest] = str(path)
         with Image.open(path) as image:
             phash = _perceptual_hash(image)
-        near_of = next((other for other_hash, other in seen_phash.items() if _hamming(phash, other_hash) <= 4), None)
+        near_of = seen_phash.find(phash, max_hamming=4)
         if near_of and near_of != str(path):
             near_duplicates.append({"path": str(path), "near_duplicate_of": near_of})
-        seen_phash.setdefault(phash, str(path))
+        seen_phash.add(phash, str(path))
         scores.append(quality_score(sample))
     return {
         "count": len(dataset),
